@@ -86,11 +86,10 @@ async fn handle_client(
     let notify_handle = tokio::spawn(async move {
         while let Ok(notification) = notify_rx.recv().await {
             let packet = Packet::Notify(notification);
-            if let Ok(payload) = serde_json::to_vec(&packet) {
-                if let Ok(encrypted) = notify_crypto.encrypt(&payload) {
-                    let mut w = notify_writer.lock().await;
-                    let _ = send_frame(&mut *w, &encrypted).await;
-                }
+            let payload = packet.encode();
+            if let Ok(encrypted) = notify_crypto.encrypt(&payload) {
+                let mut w = notify_writer.lock().await;
+                let _ = send_frame(&mut *w, &encrypted).await;
             }
         }
     });
@@ -133,70 +132,23 @@ async fn handle_client(
             }
         };
 
-        // ── Detect binary tool call (magic byte 0x01) ──
-        if crate::binary_tool::is_binary_tool_call(&decrypted) {
-            match crate::binary_tool::decode_binary_tool_call(&decrypted) {
-                Ok(Some(btc)) => {
-                    let requester = btc.requester.clone();
-                    let target = btc.target.clone();
-                    let tool_name = crate::binary_tool::tool_id_to_name(btc.tool_id);
-                    println!(
-                        "[SERVER] Binary tool call 0x{:02X} ({}) from {} → {}",
-                        btc.tool_id, tool_name, requester, target
-                    );
-                    // Forward to target agent (re-encrypt the raw binary bytes)
+        // ── Try Packet (binary format) ──
+        let packet: Packet = match Packet::decode(&decrypted) {
+            Ok(p) => p,
+            Err(e) => {
+                // Also try ResponsePacket (P2P replies, still JSON for now)
+                if let Ok(response) = ResponsePacket::decode(&decrypted) {
+                    let requester = get_requester_from_response(&response);
+                    println!("[SERVER] Response from {:?} → forwarding to '{}'", username, requester);
                     let state = state.lock().await;
                     if let Ok(encrypted) = crypto.encrypt(&decrypted) {
-                        if !state.send_to_agent(&target, encrypted) {
-                            // Target unreachable — respond with error
-                            let response = ResponsePacket::ToolCallResult {
-                                requester: requester.clone(),
-                                tool_name: tool_name.to_string(),
-                                success: false,
-                                output: format!("Target agent '{}' not found", target),
-                            };
-                            if let Ok(payload) = serde_json::to_vec(&response) {
-                                if let Ok(enc) = crypto.encrypt(&payload) {
-                                    let _ = state.send_to_agent(&requester, enc);
-                                }
-                            }
+                        if !state.send_to_agent(&requester, encrypted) {
+                            eprintln!("[SERVER] Cannot forward response: requester '{}' not found", requester);
                         }
                     }
                     continue;
                 }
-                Ok(None) => {} // fall through to JSON
-                Err(e) => {
-                    eprintln!("[SERVER] Binary tool call decode error: {}", e);
-                    continue;
-                }
-            }
-        }
-
-        // ── Try ResponsePacket first (P2P replies from target agents) ──
-        if let Ok(response) = serde_json::from_slice::<ResponsePacket>(&decrypted) {
-            let requester = get_requester_from_response(&response);
-            println!(
-                "[SERVER] Response from {:?} → forwarding to '{}'",
-                username, requester
-            );
-            // Re-encrypt and forward to the requester
-            let state = state.lock().await;
-            if let Ok(encrypted) = crypto.encrypt(&decrypted) {
-                if !state.send_to_agent(&requester, encrypted) {
-                    eprintln!(
-                        "[SERVER] Cannot forward response: requester '{}' not found",
-                        requester
-                    );
-                }
-            }
-            continue;
-        }
-
-        // ── Try Packet (normal swarm traffic) ──
-        let packet: Packet = match serde_json::from_slice(&decrypted) {
-            Ok(p) => p,
-            Err(e) => {
-                eprintln!("[SERVER] Deserialize error: {}", e);
+                eprintln!("[SERVER] Decode error: {}", e);
                 continue;
             }
         };
@@ -609,7 +561,7 @@ async fn forward_or_handle_locally(
     local_handler: impl FnOnce() -> ResponsePacket,
 ) {
     let state = state.lock().await;
-    let payload = serde_json::to_vec(packet).unwrap();
+    let payload = packet.encode();
     let encrypted = match crypto.encrypt(&payload) {
         Ok(e) => e,
         Err(e) => {
@@ -621,18 +573,11 @@ async fn forward_or_handle_locally(
     if state.send_to_agent(target, encrypted) {
         println!("[SERVER] Forwarded {} to '{}'", packet.describe(), target);
     } else {
-        // Target unreachable — handle locally
-        println!(
-            "[SERVER] Target '{}' unreachable, handling {} locally",
-            target,
-            packet.describe()
-        );
+        println!("[SERVER] Target '{}' unreachable, handling {} locally", target, packet.describe());
         let response = local_handler();
-        if let Ok(payload) = serde_json::to_vec(&response) {
-            if let Ok(encrypted) = crypto.encrypt(&payload) {
-                // Send back to requester
-                let _ = state.send_to_agent(requester, encrypted);
-            }
+        let payload = response.encode();
+        if let Ok(encrypted) = crypto.encrypt(&payload) {
+            let _ = state.send_to_agent(requester, encrypted);
         }
     }
 }
@@ -653,10 +598,9 @@ fn get_requester_from_response(resp: &ResponsePacket) -> String {
 }
 
 fn send_response_to(crypto: &Crypto, tx: &mpsc::UnboundedSender<Vec<u8>>, resp: &ResponsePacket) {
-    if let Ok(payload) = serde_json::to_vec(resp) {
-        if let Ok(encrypted) = crypto.encrypt(&payload) {
-            let _ = tx.send(encrypted);
-        }
+    let payload = resp.encode();
+    if let Ok(encrypted) = crypto.encrypt(&payload) {
+        let _ = tx.send(encrypted);
     }
 }
 

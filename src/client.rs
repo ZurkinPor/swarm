@@ -101,34 +101,10 @@ async fn run_interactive(
                 Ok(d) => d,
                 Err(e) => { eprintln!("[CLIENT] Decrypt error: {}", e); continue; }
             };
-            if crate::binary_tool::is_binary_tool_call(&decrypted) {
-                match crate::binary_tool::decode_binary_tool_call(&decrypted) {
-                    Ok(Some(btc)) => {
-                        if btc.target == username_read {
-                            let tool_name = crate::binary_tool::tool_id_to_name(btc.tool_id);
-                            eprintln!("[BINARY-TOOL] 0x{:02X} ({}) from {} → executing", btc.tool_id, tool_name, btc.requester);
-                            let (success, output) = crate::tools::execute_tool(tool_name, &btc.arguments);
-                            let response = ResponsePacket::ToolCallResult { requester: btc.requester, tool_name: tool_name.to_string(), success, output };
-                            let payload = serde_json::to_vec(&response).unwrap();
-                            if let Ok(encrypted) = crypto_read.encrypt(&payload) {
-                                let mut w = writer_p2p.lock().await;
-                                let len = encrypted.len() as u32;
-                                let _ = w.write_all(&len.to_be_bytes()).await;
-                                let _ = w.write_all(&encrypted).await;
-                                let _ = w.flush().await;
-                            }
-                        }
-                        continue;
-                    }
-                    _ => {}
-                }
-            }
-            if let Ok(response) = serde_json::from_slice::<ResponsePacket>(&decrypted) {
-                handle_response(&response); continue;
-            }
-            if let Ok(packet) = serde_json::from_slice::<Packet>(&decrypted) {
+            // Try binary Packet first
+            if let Ok(packet) = Packet::decode(&decrypted) {
                 if let Some(response) = handle_p2p_request(&packet, &username_read) {
-                    let payload = serde_json::to_vec(&response).unwrap();
+                    let payload = response.encode();
                     if let Ok(encrypted) = crypto_read.encrypt(&payload) {
                         let mut w = writer_p2p.lock().await;
                         let len = encrypted.len() as u32;
@@ -140,6 +116,10 @@ async fn run_interactive(
                 }
                 handle_incoming_packet(&packet, &username_read);
                 continue;
+            }
+            // Then try JSON ResponsePacket (P2P replies)
+            if let Ok(response) = ResponsePacket::decode(&decrypted) {
+                handle_response(&response); continue;
             }
             eprintln!("[CLIENT] Received unknown data: {}", String::from_utf8_lossy(&decrypted));
         }
@@ -167,7 +147,7 @@ async fn run_interactive(
             _ => {
                 let packet = parse_command(line, &username_clone);
                 if let Some(p) = packet {
-                    send_packet_or_binary(&writer_clone, &crypto_cmd, &p).await?;
+                    send_packet(&writer_clone, &crypto_cmd, &p).await?;
                 } else {
                     println!("Unknown command. Type 'help' for available commands.");
                 }
@@ -228,36 +208,10 @@ async fn run_pipe_mode(
         while let Some(frame_result) = framed.next().await {
             let encrypted = match frame_result { Ok(f) => f, Err(_) => break };
             let decrypted = match crypto_read.decrypt(&encrypted) { Ok(d) => d, Err(_) => continue };
-            if crate::binary_tool::is_binary_tool_call(&decrypted) {
-                match crate::binary_tool::decode_binary_tool_call(&decrypted) {
-                    Ok(Some(btc)) => {
-                        if btc.target == username_read {
-                            let tool_name = crate::binary_tool::tool_id_to_name(btc.tool_id);
-                            let (success, output) = crate::tools::execute_tool(tool_name, &btc.arguments);
-                            let response = ResponsePacket::ToolCallResult { requester: btc.requester.clone(), tool_name: tool_name.to_string(), success, output };
-                            let payload = serde_json::to_vec(&response).unwrap();
-                            if let Ok(encrypted) = crypto_read.encrypt(&payload) {
-                                let mut w = writer_p2p.lock().await;
-                                let len = encrypted.len() as u32;
-                                let _ = w.write_all(&len.to_be_bytes()).await;
-                                let _ = w.write_all(&encrypted).await;
-                                let _ = w.flush().await;
-                            }
-                        }
-                        let _ = event_tx.send(json!({"type":"binary_tool_call","data":{"tool_id":format!("0x{:02X}", btc.tool_id),"tool_name":crate::binary_tool::tool_id_to_name(btc.tool_id),"target":btc.target,"requester":btc.requester,"arguments":btc.arguments}}));
-                        continue;
-                    }
-                    _ => {}
-                }
-            }
-            if let Ok(response) = serde_json::from_slice::<ResponsePacket>(&decrypted) {
-                let json = serde_json::to_value(&response).unwrap();
-                let _ = event_tx.send(json!({"type":"response","data":json}));
-                continue;
-            }
-            if let Ok(packet) = serde_json::from_slice::<Packet>(&decrypted) {
+            // Try binary Packet first
+            if let Ok(packet) = Packet::decode(&decrypted) {
                 if let Some(response) = handle_p2p_request(&packet, &username_read) {
-                    let payload = serde_json::to_vec(&response).unwrap();
+                    let payload = response.encode();
                     if let Ok(encrypted) = crypto_read.encrypt(&payload) {
                         let mut w = writer_p2p.lock().await;
                         let len = encrypted.len() as u32;
@@ -267,10 +221,15 @@ async fn run_pipe_mode(
                     }
                     continue;
                 }
-                let json = serde_json::to_value(&packet).unwrap();
-                let _ = event_tx.send(json!({"type":"event","data":json}));
+                let _ = event_tx.send(json!({"type":"event","packet_type":packet.describe()}));
                 continue;
             }
+            if let Ok(response) = ResponsePacket::decode(&decrypted) {
+                let json = serde_json::to_value(&response).unwrap();
+                let _ = event_tx.send(json!({"type":"response","data":json}));
+                continue;
+            }
+
         }
     });
 
@@ -299,7 +258,7 @@ async fn run_pipe_mode(
         match cmd_type {
             "quit" | "exit" => break,
             _ => match json_command_to_packet(&cmd, &username) {
-                Ok(Some(packet)) => send_packet_or_binary(&writer, &crypto, &packet).await?,
+                Ok(Some(packet)) => send_packet(&writer, &crypto, &packet).await?,
                 Ok(None) => {},
                 Err(e) => println!("{}", serde_json::to_string(&json!({"type":"error","message":e})).unwrap()),
             }
@@ -386,8 +345,8 @@ fn json_command_to_packet(cmd: &Value, username: &str) -> Result<Option<Packet>,
             let target = cmd["target"].as_str().ok_or("'target' required")?;
             let tool_id: u8 = if let Some(v) = cmd["tool_id"].as_u64() { v as u8 } else if let Some(s) = cmd["tool_id"].as_str() { if let Some(hex) = s.strip_prefix("0x") { u8::from_str_radix(hex, 16).map_err(|e| e.to_string())? } else { s.parse().map_err(|e| format!("Invalid tool_id: {}", e))? } } else { return Err("'tool_id' required (e.g. 1 or 0x80)".into()); };
             let args = cmd.get("args").cloned().unwrap_or(serde_json::Value::Object(Default::default()));
-            let args_json = serde_json::to_string(&args).map_err(|e| e.to_string())?;
-            Ok(Some(Packet::ToolCall(packet::ToolCallPayload { requester: username.to_string(), target: target.to_string(), tool_name: format!("__binary_0x{:02X}__", tool_id), arguments: serde_json::json!({"__binary":true,"tool_id":tool_id,"args_json":args_json}) })))
+            let tool_name = binary_tool::tool_id_to_name(tool_id);
+            Ok(Some(Packet::ToolCall(packet::ToolCallPayload { requester: username.to_string(), target: target.to_string(), tool_name: tool_name.to_string(), arguments: args })))
         }
         "cp" | "copy" => { let target = cmd["target"].as_str().ok_or("'target' required")?; let src = cmd["src"].as_str().ok_or("'src' required")?; let dst = cmd["dst"].as_str().ok_or("'dst' required")?; Ok(Some(Packet::ToolCall(packet::ToolCallPayload { requester: username.to_string(), target: target.to_string(), tool_name: "copy_file".into(), arguments: json!({"src":src,"dst":dst}) }))) }
         "mv" | "move" => { let target = cmd["target"].as_str().ok_or("'target' required")?; let src = cmd["src"].as_str().ok_or("'src' required")?; let dst = cmd["dst"].as_str().ok_or("'dst' required")?; Ok(Some(Packet::ToolCall(packet::ToolCallPayload { requester: username.to_string(), target: target.to_string(), tool_name: "move_file".into(), arguments: json!({"src":src,"dst":dst}) }))) }
@@ -406,9 +365,8 @@ fn json_command_to_packet(cmd: &Value, username: &str) -> Result<Option<Packet>,
             let local_path = cmd["local"].as_str().ok_or("'local' path required")?;
             let remote_path = cmd["remote"].as_str().ok_or("'remote' path required")?;
             let overwrite = cmd["overwrite"].as_bool().unwrap_or(false);
-            let bytes = std::fs::read(local_path).map_err(|e| format!("Can't read local file: {}", e))?;
-            let b64 = base64_encode(&bytes);
-            Ok(Some(Packet::SendFile(packet::SendFilePayload { requester: username.to_string(), target: target.to_string(), path: remote_path.to_string(), content_b64: b64, overwrite })))
+            let content = std::fs::read(local_path).map_err(|e| format!("Can't read local file: {}", e))?;
+            Ok(Some(Packet::SendFile(packet::SendFilePayload { requester: username.to_string(), target: target.to_string(), path: remote_path.to_string(), content, overwrite })))
         }
         "recv" | "download" => {
             let target = cmd["target"].as_str().ok_or("'target' required")?;
@@ -425,7 +383,7 @@ fn json_command_to_packet(cmd: &Value, username: &str) -> Result<Option<Packet>,
 // ── Shared helpers ──
 
 async fn send_packet(writer: &Mutex<impl AsyncWriteExt + Unpin>, crypto: &Crypto, packet: &Packet) -> anyhow::Result<()> {
-    let payload = serde_json::to_vec(packet)?;
+    let payload = packet.encode();
     let encrypted = crypto.encrypt(&payload)?;
     let mut w = writer.lock().await;
     let len = encrypted.len() as u32;
@@ -433,25 +391,6 @@ async fn send_packet(writer: &Mutex<impl AsyncWriteExt + Unpin>, crypto: &Crypto
     w.write_all(&encrypted).await?;
     w.flush().await?;
     Ok(())
-}
-
-async fn send_packet_or_binary(writer: &Mutex<impl AsyncWriteExt + Unpin>, crypto: &Crypto, packet: &Packet) -> anyhow::Result<()> {
-    if let Packet::ToolCall(payload) = packet {
-        if payload.arguments.get("__binary").and_then(|v| v.as_bool()) == Some(true) {
-            let tool_id = payload.arguments["tool_id"].as_u64().unwrap_or(0) as u8;
-            let args_json = payload.arguments["args_json"].as_str().unwrap_or("{}");
-            eprintln!("[BINARY-SEND] tool 0x{:02X} → {}", tool_id, payload.target);
-            let raw = binary_tool::encode_binary_tool_call(tool_id, &payload.target, &payload.requester, args_json);
-            let encrypted = crypto.encrypt(&raw)?;
-            let mut w = writer.lock().await;
-            let len = encrypted.len() as u32;
-            w.write_all(&len.to_be_bytes()).await?;
-            w.write_all(&encrypted).await?;
-            w.flush().await?;
-            return Ok(());
-        }
-    }
-    send_packet(writer, crypto, packet).await
 }
 
 fn handle_p2p_request(packet: &Packet, our_username: &str) -> Option<ResponsePacket> {
@@ -474,16 +413,16 @@ fn handle_p2p_request(packet: &Packet, our_username: &str) -> Option<ResponsePac
         } else { None },
         // ── Swarm File Transfer ──
         Packet::SendFile(payload) => if payload.target == our_username {
-            eprintln!("[SWARM] Receiving file '{}' from {} ({} bytes b64)", payload.path, payload.requester, payload.content_b64.len());
-            match base64_decode_and_write(&payload.path, &payload.content_b64, payload.overwrite) {
+            eprintln!("[SWARM] Receiving file '{}' from {} ({} bytes)", payload.path, payload.requester, payload.content.len());
+            match write_file_raw(&payload.path, &payload.content, payload.overwrite) {
                 Ok(bytes) => Some(ResponsePacket::SendFileResult { requester: payload.requester.clone(), path: payload.path.clone(), bytes_written: bytes }),
                 Err(e) => Some(ResponsePacket::Error { requester: payload.requester.clone(), message: e }),
             }
         } else { None },
         Packet::ReceiveFile(payload) => if payload.target == our_username {
             eprintln!("[SWARM] Sending file '{}' to {}", payload.path, payload.requester);
-            match base64_encode_file(&payload.path, payload.max_bytes.unwrap_or(10_000_000)) {
-                Ok((b64, size)) => Some(ResponsePacket::ReceiveFileResult { requester: payload.requester.clone(), path: payload.path.clone(), content_b64: b64, size_bytes: size }),
+            match read_file_raw(&payload.path, payload.max_bytes.unwrap_or(10_000_000)) {
+                Ok((content, size)) => Some(ResponsePacket::ReceiveFileResult { requester: payload.requester.clone(), path: payload.path.clone(), content, size_bytes: size }),
                 Err(e) => Some(ResponsePacket::Error { requester: payload.requester.clone(), message: e }),
             }
         } else { None },
@@ -508,13 +447,12 @@ fn handle_response(resp: &ResponsePacket) {
         ResponsePacket::ChannelListResult { channels, .. } => if channels.is_empty() { println!("[CHANNELS] No visible channels."); } else { println!("[CHANNELS]"); for ch in channels { println!("  #{} ({} members, {} by {})", ch.name, ch.member_count, ch.visibility, ch.created_by); if let Some(desc) = &ch.description { if !desc.is_empty() { println!("    {}", desc); } } } }
         ResponsePacket::Error { message, .. } => println!("[ERROR] {}", message),
         ResponsePacket::SendFileResult { path, bytes_written, .. } => println!("[SWARM] Sent '{}' — {} bytes written", path, bytes_written),
-        ResponsePacket::ReceiveFileResult { path, content_b64, size_bytes, .. } => {
-            println!("[SWARM] Received '{}' — {} bytes (b64: {} chars)", path, size_bytes, content_b64.len());
-            // Auto-decode and save to current directory
+        ResponsePacket::ReceiveFileResult { path, content, size_bytes, .. } => {
+            println!("[SWARM] Received '{}' — {} bytes", path, size_bytes);
             let local_name = std::path::Path::new(path).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| path.clone());
-            match base64_decode_and_write(&local_name, content_b64, true) {
-                Ok(written) => println!("[SWARM] Decoded and saved as './{}' ({} bytes)", local_name, written),
-                Err(e) => eprintln!("[SWARM] Failed to save received file: {}", e),
+            match write_file_raw(&local_name, content, true) {
+                Ok(written) => println!("[SWARM] Saved as './{}' ({} bytes)", local_name, written),
+                Err(e) => eprintln!("[SWARM] Failed to save: {}", e),
             }
         }
         ResponsePacket::DeleteFileResult { path, deleted, .. } => println!("[SWARM] Delete '{}': {}", path, if *deleted { "OK" } else { "FAILED (not found?)" }),
@@ -605,8 +543,9 @@ fn parse_command(line: &str, username: &str) -> Option<Packet> {
         "btc" | "binary-tool" => {
             let mut sub = rest.splitn(3, ' '); let target = sub.next()?; let id_str = sub.next()?; let args_str = sub.next().unwrap_or("{}");
             let tool_id: u8 = if let Some(hex) = id_str.strip_prefix("0x") { u8::from_str_radix(hex, 16).ok()? } else { id_str.parse().ok()? };
-            let args: serde_json::Value = serde_json::from_str(args_str).ok()?; let args_json = serde_json::to_string(&args).ok()?;
-            Some(Packet::ToolCall(packet::ToolCallPayload { requester: username.to_string(), target: target.to_string(), tool_name: format!("__binary_0x{:02X}__", tool_id), arguments: serde_json::json!({"__binary":true,"tool_id":tool_id,"args_json":args_json}) }))
+            let tool_name = binary_tool::tool_id_to_name(tool_id);
+            let arguments: serde_json::Value = serde_json::from_str(args_str).ok()?;
+            Some(Packet::ToolCall(packet::ToolCallPayload { requester: username.to_string(), target: target.to_string(), tool_name: tool_name.to_string(), arguments }))
         }
         "cp" | "copy" => { let mut sub = rest.splitn(3, ' '); let target = sub.next()?; let src = sub.next()?; let dst = sub.next()?; Some(Packet::ToolCall(packet::ToolCallPayload { requester: username.to_string(), target: target.to_string(), tool_name: "copy_file".into(), arguments: json!({"src":src,"dst":dst}) })) }
         "mv" | "move" => { let mut sub = rest.splitn(3, ' '); let target = sub.next()?; let src = sub.next()?; let dst = sub.next()?; Some(Packet::ToolCall(packet::ToolCallPayload { requester: username.to_string(), target: target.to_string(), tool_name: "move_file".into(), arguments: json!({"src":src,"dst":dst}) })) }
@@ -633,10 +572,9 @@ fn parse_command(line: &str, username: &str) -> Option<Packet> {
                 Err(e) => { println!("[SWARM] Cannot read '{}': {}", local, e); return Some(Packet::Status(packet::StatusPayload { username: username.to_string(), status: packet::AgentStatus::Idle, task_id: None, progress_pct: None, message: None })); }
                 _ => {}
             }
-            let bytes = match std::fs::read(local) { Ok(b) => b, Err(e) => { println!("[SWARM] Failed to read '{}': {}", local, e); return Some(Packet::Status(packet::StatusPayload { username: username.to_string(), status: packet::AgentStatus::Idle, task_id: None, progress_pct: None, message: None })); } };
-            let b64 = base64_encode(&bytes);
-            println!("[SWARM] Sending '{}' ({} bytes) → {}:{}", local, bytes.len(), target, remote);
-            Some(Packet::SendFile(packet::SendFilePayload { requester: username.to_string(), target: target.to_string(), path: remote.to_string(), content_b64: b64, overwrite: false }))
+            let content = match std::fs::read(local) { Ok(b) => b, Err(e) => { println!("[SWARM] Failed to read '{}': {}", local, e); return Some(Packet::Status(packet::StatusPayload { username: username.to_string(), status: packet::AgentStatus::Idle, task_id: None, progress_pct: None, message: None })); } };
+            println!("[SWARM] Sending '{}' ({} bytes) → {}:{}", local, content.len(), target, remote);
+            Some(Packet::SendFile(packet::SendFilePayload { requester: username.to_string(), target: target.to_string(), path: remote.to_string(), content, overwrite: false }))
         }
         "recv" | "download" => {
             let mut sub = rest.splitn(2, ' '); let target = sub.next()?; let path = sub.next()?;
@@ -660,72 +598,28 @@ fn parse_command(line: &str, username: &str) -> Option<Packet> {
     }
 }
 
-// ── Base64 helpers for Swarm file transfer ──
+// ── Raw file helpers (no base64, binary packets carry raw bytes) ──
 
-fn base64_decode_and_write(path: &str, b64: &str, overwrite: bool) -> Result<u64, String> {
+fn write_file_raw(path: &str, data: &[u8], overwrite: bool) -> Result<u64, String> {
     if !overwrite && std::path::Path::new(path).exists() {
         return Err(format!("File '{}' already exists. Use overwrite=true to replace.", path));
     }
-    let bytes = base64_decode(b64)?;
     if let Some(parent) = std::path::Path::new(path).parent() {
         if !parent.as_os_str().is_empty() {
             let _ = std::fs::create_dir_all(parent);
         }
     }
-    std::fs::write(path, &bytes).map_err(|e| format!("Write failed: {}", e))?;
-    Ok(bytes.len() as u64)
+    std::fs::write(path, data).map_err(|e| format!("Write failed: {}", e))?;
+    Ok(data.len() as u64)
 }
 
-fn base64_encode_file(path: &str, max_bytes: u64) -> Result<(String, u64), String> {
+fn read_file_raw(path: &str, max_bytes: u64) -> Result<(Vec<u8>, u64), String> {
     let bytes = std::fs::read(path).map_err(|e| format!("Read failed: {}", e))?;
     if bytes.len() as u64 > max_bytes {
         return Err(format!("File too large: {} bytes (max: {})", bytes.len(), max_bytes));
     }
-    let b64 = base64_encode(&bytes);
-    Ok((b64, bytes.len() as u64))
-}
-
-/// Simple base64 encode (no external deps).
-fn base64_encode(data: &[u8]) -> String {
-    const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity((data.len() + 2) / 3 * 4);
-    for chunk in data.chunks(3) {
-        let b0 = chunk[0] as u32;
-        let b1 = if chunk.len() > 1 { chunk[1] as u32 } else { 0 };
-        let b2 = if chunk.len() > 2 { chunk[2] as u32 } else { 0 };
-        let triple = (b0 << 16) | (b1 << 8) | b2;
-        out.push(CHARS[((triple >> 18) & 0x3F) as usize] as char);
-        out.push(CHARS[((triple >> 12) & 0x3F) as usize] as char);
-        out.push(if chunk.len() > 1 { CHARS[((triple >> 6) & 0x3F) as usize] as char } else { '=' });
-        out.push(if chunk.len() > 2 { CHARS[(triple & 0x3F) as usize] as char } else { '=' });
-    }
-    out
-}
-
-/// Simple base64 decode.
-fn base64_decode(data: &str) -> Result<Vec<u8>, String> {
-    let data = data.trim_end_matches('=');
-    let mut out = Vec::with_capacity(data.len() * 3 / 4);
-    let mut buf: u32 = 0;
-    let mut bits: u32 = 0;
-    for ch in data.chars() {
-        let val = match ch {
-            'A'..='Z' => ch as u32 - 'A' as u32,
-            'a'..='z' => ch as u32 - 'a' as u32 + 26,
-            '0'..='9' => ch as u32 - '0' as u32 + 52,
-            '+' => 62,
-            '/' => 63,
-            _ => return Err(format!("Invalid base64 char: {}", ch)),
-        };
-        buf = (buf << 6) | val;
-        bits += 6;
-        if bits >= 8 {
-            bits -= 8;
-            out.push((buf >> bits) as u8);
-            buf &= (1 << bits) - 1;
-        }
-    }
-    Ok(out)
+    let size = bytes.len() as u64;
+    Ok((bytes, size))
 }
 
 fn list_local_dir(path: &str, recursive: bool) -> anyhow::Result<Vec<packet::DirEntry>> {
