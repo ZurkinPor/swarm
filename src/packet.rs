@@ -88,6 +88,9 @@ impl Packet {
             Packet::DeleteFile(_) => 22,
             Packet::MakeDir(_) => 23,
             Packet::ListUsers(_) => 24,
+            Packet::SyncScan(_) => 25,
+            Packet::SyncManifest(_) => 26,
+            Packet::SyncDone(_) => 27,
         }
     }
 
@@ -117,6 +120,9 @@ impl Packet {
             22 => Ok(Packet::DeleteFile(DeleteFilePayload::decode(r)?)),
             23 => Ok(Packet::MakeDir(MakeDirPayload::decode(r)?)),
             24 => Ok(Packet::ListUsers(ListUsersPayload::decode(r)?)),
+            25 => Ok(Packet::SyncScan(SyncScanPayload::decode(r)?)),
+            26 => Ok(Packet::SyncManifest(SyncManifestPayload::decode(r)?)),
+            27 => Ok(Packet::SyncDone(SyncDonePayload::decode(r)?)),
             _ => Err("unknown packet type"),
         }
     }
@@ -205,6 +211,9 @@ impl Packet {
             Packet::DeleteFile(p) => p.encode(),
             Packet::MakeDir(p) => p.encode(),
             Packet::ListUsers(p) => p.encode(),
+            Packet::SyncScan(p) => p.encode(),
+            Packet::SyncManifest(p) => p.encode(),
+            Packet::SyncDone(p) => p.encode(),
         }
     }
 }
@@ -237,6 +246,9 @@ pub enum Packet {
     DeleteFile(DeleteFilePayload),
     MakeDir(MakeDirPayload),
     ListUsers(ListUsersPayload),
+    SyncScan(SyncScanPayload),
+    SyncManifest(SyncManifestPayload),
+    SyncDone(SyncDonePayload),
 }
 
 // ── Payload structs with encode/decode ───────────────────────
@@ -248,11 +260,12 @@ pub struct JoinPayload {
     pub capabilities: Vec<String>,
     pub workspace_mode: Option<String>,
     pub project_root: Option<String>,
+    pub project: Option<String>,
     pub is_orchestrator: bool,
 }
 impl JoinPayload {
-    fn encode(&self) -> Vec<u8> { let mut w = BinWriter::new(); w.flag(self.is_orchestrator); w.str8(&self.username); w.opt_str16(&self.role); w.u8(self.capabilities.len() as u8); for c in &self.capabilities { w.str16(c); } w.opt_str16(&self.workspace_mode); w.opt_str16(&self.project_root); w.finish() }
-    fn decode(r: &mut BinReader) -> Result<Self, &'static str> { let is_orchestrator = r.flag()?; let username = r.str8()?; let role = r.opt_str16()?; let ncap = r.u8()? as usize; let mut capabilities = Vec::with_capacity(ncap); for _ in 0..ncap { capabilities.push(r.str16()?); } let workspace_mode = r.opt_str16()?; let project_root = r.opt_str16()?; Ok(Self { username, role, capabilities, workspace_mode, project_root, is_orchestrator }) }
+    fn encode(&self) -> Vec<u8> { let mut w = BinWriter::new(); w.flag(self.is_orchestrator); w.str8(&self.username); w.opt_str16(&self.role); w.u8(self.capabilities.len() as u8); for c in &self.capabilities { w.str16(c); } w.opt_str16(&self.workspace_mode); w.opt_str16(&self.project_root); w.opt_str16(&self.project); w.finish() }
+    fn decode(r: &mut BinReader) -> Result<Self, &'static str> { let is_orchestrator = r.flag()?; let username = r.str8()?; let role = r.opt_str16()?; let ncap = r.u8()? as usize; let mut capabilities = Vec::with_capacity(ncap); for _ in 0..ncap { capabilities.push(r.str16()?); } let workspace_mode = r.opt_str16()?; let project_root = r.opt_str16()?; let project = r.opt_str16()?; Ok(Self { username, role, capabilities, workspace_mode, project_root, project, is_orchestrator }) }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -265,17 +278,17 @@ impl LeavePayload {
 // Notify payloads embed their event data as JSON (complex nested structure)
 #[derive(Debug, Clone, PartialEq)]
 pub enum NotifyPayload {
-    AgentJoined { username: String, role: Option<String>, workspace_mode: Option<String>, project_root: Option<String>, is_orchestrator: bool },
+    AgentJoined { username: String, role: Option<String>, workspace_mode: Option<String>, project_root: Option<String>, project: Option<String>, is_orchestrator: bool },
     AgentLeft { username: String, reason: Option<String> },
-    TaskCreated { task_id: Uuid, title: String, assigned_role: Option<String> },
+    TaskCreated { task_id: Uuid, title: String, assigned_role: Option<String>, project: Option<String> },
     TaskAssigned { task_id: Uuid, username: String },
     TaskCompleted { task_id: Uuid, username: String, result: Option<String>, artifacts: Vec<String> },
-    ChannelCreated { channel_id: Uuid, name: String, created_by: String, visibility: String },
+    ChannelCreated { channel_id: Uuid, name: String, created_by: String, visibility: String, project: Option<String> },
     ChannelJoined { channel_name: String, username: String },
     ChannelLeft { channel_name: String, username: String },
     ChannelDeleted { channel_name: String, deleted_by: String },
     StatusUpdate { username: String, status: String, task_id: Option<Uuid>, progress_pct: Option<u8> },
-    MessageReceived { from: String, to: String, body: String, timestamp: u64, datetime_utc: String, time_region: String },
+    MessageReceived { from: String, to: String, body: String, timestamp: u64, datetime_utc: String, time_region: String, project: Option<String> },
 }
 impl NotifyPayload {
     fn event_id(&self) -> u8 {
@@ -297,17 +310,17 @@ impl NotifyPayload {
         let mut w = BinWriter::new();
         w.u8(self.event_id());
         match self {
-            NotifyPayload::AgentJoined { username, role, workspace_mode, project_root, is_orchestrator } => {
-                w.flag(*is_orchestrator); w.str8(username); w.opt_str16(role); w.opt_str16(workspace_mode); w.opt_str16(project_root);
+            NotifyPayload::AgentJoined { username, role, workspace_mode, project_root, project, is_orchestrator } => {
+                w.flag(*is_orchestrator); w.str8(username); w.opt_str16(role); w.opt_str16(workspace_mode); w.opt_str16(project_root); w.opt_str16(project);
             }
             NotifyPayload::AgentLeft { username, reason } => { w.str8(username); w.opt_str16(reason); }
-            NotifyPayload::TaskCreated { task_id, title, assigned_role } => { w.uuid(task_id); w.str16(title); w.opt_str16(assigned_role); }
+            NotifyPayload::TaskCreated { task_id, title, assigned_role, project } => { w.uuid(task_id); w.str16(title); w.opt_str16(assigned_role); w.opt_str16(project); }
             NotifyPayload::TaskAssigned { task_id, username } => { w.uuid(task_id); w.str8(username); }
             NotifyPayload::TaskCompleted { task_id, username, result, artifacts } => {
                 w.uuid(task_id); w.str8(username); w.opt_str16(result);
                 w.u8(artifacts.len() as u8); for a in artifacts { w.str16(a); }
             }
-            NotifyPayload::ChannelCreated { channel_id, name, created_by, visibility } => { w.uuid(channel_id); w.str8(name); w.str8(created_by); w.str8(visibility); }
+            NotifyPayload::ChannelCreated { channel_id, name, created_by, visibility, project } => { w.uuid(channel_id); w.str8(name); w.str8(created_by); w.str8(visibility); w.opt_str16(project); }
             NotifyPayload::ChannelJoined { channel_name, username } => { w.str8(channel_name); w.str8(username); }
             NotifyPayload::ChannelLeft { channel_name, username } => { w.str8(channel_name); w.str8(username); }
             NotifyPayload::ChannelDeleted { channel_name, deleted_by } => { w.str8(channel_name); w.str8(deleted_by); }
@@ -316,34 +329,34 @@ impl NotifyPayload {
                 w.flag(task_id.is_some()); if let Some(tid) = task_id { w.uuid(tid); }
                 w.flag(progress_pct.is_some()); if let Some(pct) = progress_pct { w.u8(*pct); }
             }
-            NotifyPayload::MessageReceived { from, to, body, timestamp, datetime_utc, time_region } => { w.u64(*timestamp); w.str8(datetime_utc); w.str8(time_region); w.str8(from); w.str8(to); w.str16(body); }
+            NotifyPayload::MessageReceived { from, to, body, timestamp, datetime_utc, time_region, project } => { w.u64(*timestamp); w.str8(datetime_utc); w.str8(time_region); w.str8(from); w.str8(to); w.str16(body); w.opt_str16(project); }
         }
         w.finish()
     }
     fn decode(r: &mut BinReader) -> Result<Self, &'static str> {
         let event = r.u8()?;
         match event {
-            0 => Ok(NotifyPayload::AgentJoined { is_orchestrator: r.flag()?, username: r.str8()?, role: r.opt_str16()?, workspace_mode: r.opt_str16()?, project_root: r.opt_str16()? }),
+            0 => Ok(NotifyPayload::AgentJoined { is_orchestrator: r.flag()?, username: r.str8()?, role: r.opt_str16()?, workspace_mode: r.opt_str16()?, project_root: r.opt_str16()?, project: r.opt_str16()? }),
             1 => Ok(NotifyPayload::AgentLeft { username: r.str8()?, reason: r.opt_str16()? }),
-            2 => Ok(NotifyPayload::TaskCreated { task_id: r.uuid()?, title: r.str16()?, assigned_role: r.opt_str16()? }),
+            2 => Ok(NotifyPayload::TaskCreated { task_id: r.uuid()?, title: r.str16()?, assigned_role: r.opt_str16()?, project: r.opt_str16()? }),
             3 => Ok(NotifyPayload::TaskAssigned { task_id: r.uuid()?, username: r.str8()? }),
             4 => { let task_id = r.uuid()?; let username = r.str8()?; let result = r.opt_str16()?; let n = r.u8()? as usize; let mut artifacts = Vec::with_capacity(n); for _ in 0..n { artifacts.push(r.str16()?); } Ok(NotifyPayload::TaskCompleted { task_id, username, result, artifacts }) }
-            5 => Ok(NotifyPayload::ChannelCreated { channel_id: r.uuid()?, name: r.str8()?, created_by: r.str8()?, visibility: r.str8()? }),
+            5 => Ok(NotifyPayload::ChannelCreated { channel_id: r.uuid()?, name: r.str8()?, created_by: r.str8()?, visibility: r.str8()?, project: r.opt_str16()? }),
             6 => Ok(NotifyPayload::ChannelJoined { channel_name: r.str8()?, username: r.str8()? }),
             7 => Ok(NotifyPayload::ChannelLeft { channel_name: r.str8()?, username: r.str8()? }),
             8 => Ok(NotifyPayload::ChannelDeleted { channel_name: r.str8()?, deleted_by: r.str8()? }),
             9 => { let username = r.str8()?; let status = r.str8()?; let task_id = if r.flag()? { Some(r.uuid()?) } else { None }; let progress_pct = if r.flag()? { Some(r.u8()?) } else { None }; Ok(NotifyPayload::StatusUpdate { username, status, task_id, progress_pct }) }
-            10 => Ok(NotifyPayload::MessageReceived { timestamp: r.u64()?, datetime_utc: r.str8()?, time_region: r.str8()?, from: r.str8()?, to: r.str8()?, body: r.str16()? }),
+            10 => Ok(NotifyPayload::MessageReceived { timestamp: r.u64()?, datetime_utc: r.str8()?, time_region: r.str8()?, from: r.str8()?, to: r.str8()?, body: r.str16()?, project: r.opt_str16()? }),
             _ => Err("unknown notify event"),
         }
     }
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct CreateTaskPayload { pub title: String, pub description: String, pub priority: TaskPriority, pub assigned_role: Option<String>, pub assign_to: Option<String> }
+pub struct CreateTaskPayload { pub title: String, pub description: String, pub priority: TaskPriority, pub assigned_role: Option<String>, pub assign_to: Option<String>, pub project: Option<String> }
 impl CreateTaskPayload {
-    fn encode(&self) -> Vec<u8> { let mut w = BinWriter::new(); w.str16(&self.title); w.str16(&self.description); w.u8(self.priority.to_u8()); w.opt_str16(&self.assigned_role); w.opt_str16(&self.assign_to); w.finish() }
-    fn decode(r: &mut BinReader) -> Result<Self, &'static str> { Ok(Self { title: r.str16()?, description: r.str16()?, priority: TaskPriority::from_u8(r.u8()?)?, assigned_role: r.opt_str16()?, assign_to: r.opt_str16()? }) }
+    fn encode(&self) -> Vec<u8> { let mut w = BinWriter::new(); w.str16(&self.title); w.str16(&self.description); w.u8(self.priority.to_u8()); w.opt_str16(&self.assigned_role); w.opt_str16(&self.assign_to); w.opt_str16(&self.project); w.finish() }
+    fn decode(r: &mut BinReader) -> Result<Self, &'static str> { Ok(Self { title: r.str16()?, description: r.str16()?, priority: TaskPriority::from_u8(r.u8()?)?, assigned_role: r.opt_str16()?, assign_to: r.opt_str16()?, project: r.opt_str16()? }) }
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -382,20 +395,20 @@ impl TaskCompletePayload {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct MessagePayload { pub from: String, pub to: MessageTarget, pub body: String, pub timestamp: u64, pub datetime_utc: String, pub time_region: String }
+pub struct MessagePayload { pub from: String, pub to: MessageTarget, pub body: String, pub timestamp: u64, pub datetime_utc: String, pub time_region: String, pub project: Option<String> }
 impl MessagePayload {
-    fn encode(&self) -> Vec<u8> { let mut w = BinWriter::new(); w.u64(self.timestamp); w.str8(&self.datetime_utc); w.str8(&self.time_region); w.str8(&self.from); match &self.to { MessageTarget::Direct { username } => { w.u8(0); w.str8(username); } MessageTarget::Channel { channel } => { w.u8(1); w.str8(channel); } } w.str16(&self.body); w.finish() }
-    fn decode(r: &mut BinReader) -> Result<Self, &'static str> { let timestamp = r.u64()?; let datetime_utc = r.str8()?; let time_region = r.str8()?; let from = r.str8()?; let target_type = r.u8()?; let to = if target_type == 0 { MessageTarget::Direct { username: r.str8()? } } else { MessageTarget::Channel { channel: r.str8()? } }; let body = r.str16()?; Ok(Self { from, to, body, timestamp, datetime_utc, time_region }) }
+    fn encode(&self) -> Vec<u8> { let mut w = BinWriter::new(); w.u64(self.timestamp); w.str8(&self.datetime_utc); w.str8(&self.time_region); w.str8(&self.from); match &self.to { MessageTarget::Direct { username } => { w.u8(0); w.str8(username); } MessageTarget::Channel { channel } => { w.u8(1); w.str8(channel); } } w.str16(&self.body); w.opt_str16(&self.project); w.finish() }
+    fn decode(r: &mut BinReader) -> Result<Self, &'static str> { let timestamp = r.u64()?; let datetime_utc = r.str8()?; let time_region = r.str8()?; let from = r.str8()?; let target_type = r.u8()?; let to = if target_type == 0 { MessageTarget::Direct { username: r.str8()? } } else { MessageTarget::Channel { channel: r.str8()? } }; let body = r.str16()?; let project = r.opt_str16()?; Ok(Self { from, to, body, timestamp, datetime_utc, time_region, project }) }
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum MessageTarget { Direct { username: String }, Channel { channel: String } }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct CreateChannelPayload { pub name: String, pub created_by: String, pub description: Option<String>, pub visibility: Option<String> }
+pub struct CreateChannelPayload { pub name: String, pub created_by: String, pub description: Option<String>, pub visibility: Option<String>, pub project: Option<String> }
 impl CreateChannelPayload {
-    fn encode(&self) -> Vec<u8> { let mut w = BinWriter::new(); w.str8(&self.name); w.str8(&self.created_by); w.opt_str16(&self.description); w.str8(self.visibility.as_deref().unwrap_or("public")); w.finish() }
-    fn decode(r: &mut BinReader) -> Result<Self, &'static str> { Ok(Self { name: r.str8()?, created_by: r.str8()?, description: r.opt_str16()?, visibility: Some(r.str8()?) }) }
+    fn encode(&self) -> Vec<u8> { let mut w = BinWriter::new(); w.str8(&self.name); w.str8(&self.created_by); w.opt_str16(&self.description); w.str8(self.visibility.as_deref().unwrap_or("public")); w.opt_str16(&self.project); w.finish() }
+    fn decode(r: &mut BinReader) -> Result<Self, &'static str> { Ok(Self { name: r.str8()?, created_by: r.str8()?, description: r.opt_str16()?, visibility: Some(r.str8()?), project: r.opt_str16()? }) }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -520,6 +533,134 @@ impl ListUsersPayload {
     fn decode(r: &mut BinReader) -> Result<Self, &'static str> { Ok(Self { requester: r.str8()? }) }
 }
 
+// ── Sync payloads (#25–#27) ──────────────────────────────────
+
+/// SHA-1 hash of file content (20 bytes).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Sha1Hash(pub [u8; 20]);
+
+/// Info about a single file in a sync manifest.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SyncFileInfo {
+    pub path: String,
+    pub size: u64,
+    pub sha1: Sha1Hash,
+    pub mtime_secs: u64,
+}
+
+/// Strategy for resolving sync conflicts.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum SyncStrategy {
+    /// Keep whichever file has the newest modification time.
+    Newest = 0,
+    /// Server's version always overrides.
+    NewestServer = 1,
+    /// Prompt user for each conflict.
+    Interactive = 2,
+}
+impl SyncStrategy {
+    fn from_u8(v: u8) -> Result<Self, &'static str> {
+        match v { 0 => Ok(Self::Newest), 1 => Ok(Self::NewestServer), 2 => Ok(Self::Interactive), _ => Err("invalid sync strategy") }
+    }
+}
+
+/// #25 — Request a sync manifest from target for a project/path.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SyncScanPayload {
+    pub requester: String,
+    pub target: String,
+    pub project: String,
+    pub strategy: SyncStrategy,
+}
+impl SyncScanPayload {
+    fn encode(&self) -> Vec<u8> {
+        let mut w = BinWriter::new();
+        w.str8(&self.requester);
+        w.str8(&self.target);
+        w.str16(&self.project);
+        w.u8(self.strategy as u8);
+        w.finish()
+    }
+    fn decode(r: &mut BinReader) -> Result<Self, &'static str> {
+        Ok(Self {
+            requester: r.str8()?,
+            target: r.str8()?,
+            project: r.str16()?,
+            strategy: SyncStrategy::from_u8(r.u8()?)?,
+        })
+    }
+}
+
+/// #26 — Return a file manifest with SHA-1 hashes.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SyncManifestPayload {
+    pub requester: String,
+    pub target: String,
+    pub files: Vec<SyncFileInfo>,
+}
+impl SyncManifestPayload {
+    fn encode(&self) -> Vec<u8> {
+        let mut w = BinWriter::new();
+        w.str8(&self.requester);
+        w.str8(&self.target);
+        w.u32(self.files.len() as u32);
+        for f in &self.files {
+            w.str16(&f.path);
+            w.u64(f.size);
+            w.0.extend_from_slice(&f.sha1.0);
+            w.u64(f.mtime_secs);
+        }
+        w.finish()
+    }
+    fn decode(r: &mut BinReader) -> Result<Self, &'static str> {
+        let requester = r.str8()?;
+        let target = r.str8()?;
+        let n = r.u32()? as usize;
+        let mut files = Vec::with_capacity(n);
+        for _ in 0..n {
+            let path = r.str16()?;
+            let size = r.u64()?;
+            r.ensure(20)?;
+            let mut sha1_bytes = [0u8; 20];
+            sha1_bytes.copy_from_slice(&r.data[r.pos..r.pos+20]);
+            r.pos += 20;
+            let mtime_secs = r.u64()?;
+            files.push(SyncFileInfo { path, size, sha1: Sha1Hash(sha1_bytes), mtime_secs });
+        }
+        Ok(Self { requester, target, files })
+    }
+}
+
+/// #27 — Sync complete with stats.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SyncDonePayload {
+    pub requester: String,
+    pub target: String,
+    pub files_synced: u32,
+    pub files_skipped: u32,
+    pub conflicts: u32,
+}
+impl SyncDonePayload {
+    fn encode(&self) -> Vec<u8> {
+        let mut w = BinWriter::new();
+        w.str8(&self.requester);
+        w.str8(&self.target);
+        w.u32(self.files_synced);
+        w.u32(self.files_skipped);
+        w.u32(self.conflicts);
+        w.finish()
+    }
+    fn decode(r: &mut BinReader) -> Result<Self, &'static str> {
+        Ok(Self {
+            requester: r.str8()?,
+            target: r.str8()?,
+            files_synced: r.u32()?,
+            files_skipped: r.u32()?,
+            conflicts: r.u32()?,
+        })
+    }
+}
+
 // ── Response packets (still use serde for internal routing, but now with binary wire format too) ──
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -567,6 +708,9 @@ impl Packet {
             Packet::SendFile(_) => "SEND_FILE", Packet::ReceiveFile(_) => "RECEIVE_FILE",
             Packet::DeleteFile(_) => "DELETE_FILE",            Packet::MakeDir(_) => "MAKE_DIR",
             Packet::ListUsers(_) => "LIST_USERS",
+            Packet::SyncScan(_) => "SYNC_SCAN",
+            Packet::SyncManifest(_) => "SYNC_MANIFEST",
+            Packet::SyncDone(_) => "SYNC_DONE",
         }
     }
 
@@ -588,7 +732,7 @@ impl Packet {
                 NotifyPayload::ChannelLeft { channel_name, username } => json!({"type":"Notify","event":"ChannelLeft","channel":channel_name,"username":username}),
                 NotifyPayload::ChannelDeleted { channel_name, deleted_by } => json!({"type":"Notify","event":"ChannelDeleted","channel":channel_name,"deleted_by":deleted_by}),
                 NotifyPayload::StatusUpdate { username, status, .. } => json!({"type":"Notify","event":"StatusUpdate","username":username,"status":status}),
-                NotifyPayload::MessageReceived { from, to, body, timestamp, datetime_utc, time_region } => json!({"type":"Notify","event":"MessageReceived","from":from,"to":to,"body":body,"timestamp":timestamp,"datetime_utc":datetime_utc,"time_region":time_region}),
+                NotifyPayload::MessageReceived { from, to, body, timestamp, datetime_utc, time_region, .. } => json!({"type":"Notify","event":"MessageReceived","from":from,"to":to,"body":body,"timestamp":timestamp,"datetime_utc":datetime_utc,"time_region":time_region}),
             },
             Packet::Message(p) => { let target = match &p.to { MessageTarget::Direct { username } => username.clone(), MessageTarget::Channel { channel } => format!("#{}", channel) }; json!({"type":"Message","from":p.from,"to":target,"body":p.body,"timestamp":p.timestamp,"datetime_utc":p.datetime_utc,"time_region":p.time_region}) }
             Packet::CreateTask(p) => json!({"type":"CreateTask","title":p.title}),
@@ -601,6 +745,9 @@ impl Packet {
             Packet::SendFile(p) => json!({"type":"SendFile","path":p.path,"size":p.content.len()}),
             Packet::ReceiveFile(p) => json!({"type":"ReceiveFile","path":p.path}),
             Packet::ListUsers(_) => json!({"type":"ListUsers"}),
+            Packet::SyncScan(p) => json!({"type":"SyncScan","requester":p.requester,"target":p.target,"project":p.project}),
+            Packet::SyncManifest(p) => json!({"type":"SyncManifest","requester":p.requester,"target":p.target,"file_count":p.files.len()}),
+            Packet::SyncDone(p) => json!({"type":"SyncDone","requester":p.requester,"synced":p.files_synced,"skipped":p.files_skipped,"conflicts":p.conflicts}),
             _ => json!({"type":self.describe()}),
         }
     }
@@ -684,6 +831,7 @@ mod tests {
             timestamp: 0,
             datetime_utc: String::new(),
             time_region: String::new(),
+            project: None,
         });
         let enc = p.encode();
         assert_eq!(enc[0], 7); // MESSAGE type

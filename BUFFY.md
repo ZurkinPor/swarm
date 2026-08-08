@@ -40,6 +40,16 @@ Then connect using:
 
 ---
 
+## Project Isolation
+
+Use `-p` to scope yourself to a specific project. You'll only see messages, tasks, and channels from agents in the same project (or untagged items).
+
+```bash
+./swarm connect -s IP -u buffy-nova-7 -p myproject
+```
+
+Without `-p`, you see everything — all projects and unlabeled messages.
+
 ## Connecting
 
 ```bash
@@ -210,6 +220,7 @@ swarm> env buffy-beast HOME
 | `tool <t> <name> [args]` | Run a tool on target |
 | `btc <t> <id> [args]` | Run tool by binary ID |
 | `tools-list` | List all 37 tool IDs |
+| `sync <t> <project>` | Sync project dir with SHA-1 integrity |
 | `hide <name>` | Hide a channel |
 | `delete-channel <name>` | Delete a channel |
 | `help` | Show all commands |

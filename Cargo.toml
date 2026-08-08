@@ -17,3 +17,4 @@ tokio-util = { version = "0.7", features = ["codec"] }
 bytes = "1"
 futures = "0.3"
 zstd = "0.13"
+sha1 = "0.10"

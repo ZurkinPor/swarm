@@ -7,6 +7,7 @@ mod packet;
 mod protocol;
 mod server;
 mod swarm;
+mod sync;
 mod task;
 mod tools;
 
@@ -63,6 +64,10 @@ enum Commands {
         /// Timezone region (e.g. "UTC-5", "EST", "Europe/London")
         #[arg(long, default_value = "UTC")]
         time_region: String,
+
+        /// Project scope for context isolation (only see messages/tasks/channels in this project)
+        #[arg(short = 'p', long)]
+        project: Option<String>,
     },
     /// Connect to a swarm server as a client agent
     Connect {
@@ -105,6 +110,10 @@ enum Commands {
         /// Timezone region (e.g. "UTC-5", "EST", "Europe/London")
         #[arg(long, default_value = "UTC")]
         time_region: String,
+
+        /// Project scope for context isolation (only see messages/tasks/channels in this project)
+        #[arg(short = 'p', long)]
+        project: Option<String>,
     },
     /// Generate a new random key file
     GenKey {
@@ -132,7 +141,7 @@ async fn main() -> anyhow::Result<()> {
             println!("Key written to {}", output.display());
             println!("Share this key with all swarm members.");
         }
-        Commands::Serve { username, role, workspace_mode, orchestrator, time_region: _ } => {
+        Commands::Serve { username, role, workspace_mode, orchestrator, time_region: _, project } => {
             let crypto = load_key(&cli.key, &cli.key_file)?;
             let crypto = Arc::new(crypto);
 
@@ -152,6 +161,7 @@ async fn main() -> anyhow::Result<()> {
                         caps,
                         Some(workspace_mode.clone()),
                         None,
+                        project.clone(),
                         orchestrator,
                     ),
                     crate::swarm::ConnectionHandle { tx },
@@ -179,6 +189,7 @@ async fn main() -> anyhow::Result<()> {
             pipe,
             orchestrator,
             time_region,
+            project,
         } => {
             let crypto = load_key(&cli.key, &cli.key_file)?;
             let crypto = Arc::new(crypto);
@@ -204,6 +215,7 @@ async fn main() -> anyhow::Result<()> {
                 caps,
                 workspace_mode,
                 project_root,
+                project,
                 pipe,
                 orchestrator,
                 time_region,

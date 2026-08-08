@@ -70,6 +70,7 @@ impl SwarmState {
                 role: agent.role.clone(),
                 workspace_mode: agent.workspace_mode.clone(),
                 project_root: agent.project_root.clone(),
+                project: agent.project.clone(),
                 is_orchestrator: agent.is_orchestrator,
             })
             .ok();
@@ -94,6 +95,7 @@ impl SwarmState {
                         timestamp: 0,
                         datetime_utc: String::new(),
                         time_region: String::new(),
+                        project: None,
                     })
                     .ok();
             }
@@ -144,12 +146,14 @@ impl SwarmState {
         assign_to: Option<String>,
         created_by: String,
     ) -> Task {
-        let task = Task::new(title, description, priority, assigned_role, assign_to, created_by);
+        let task = Task::new(title, description, priority, assigned_role, assign_to, created_by.clone());
+        let sender_project = self.agents.get(&created_by).and_then(|a| a.project.clone());
         self.broadcast_tx
             .send(NotifyPayload::TaskCreated {
                 task_id: task.id,
                 title: task.title.clone(),
                 assigned_role: task.assigned_role.clone(),
+                project: sender_project,
             })
             .ok();
         self.task_creation_times.insert(task.id, Instant::now());
@@ -326,12 +330,14 @@ impl SwarmState {
             ChannelVisibility::Public => "public",
             ChannelVisibility::Private => "private",
         };
+        let creator_project = self.agents.get(&created_by).and_then(|a| a.project.clone());
         self.broadcast_tx
             .send(NotifyPayload::ChannelCreated {
                 channel_id,
                 name: name.clone(),
-                created_by,
+                created_by: created_by.clone(),
                 visibility: vis_str.to_string(),
+                project: creator_project,
             })
             .ok();
         self.channels.insert(name, channel.clone());
@@ -451,6 +457,7 @@ impl SwarmState {
         timestamp: u64,
         datetime_utc: &str,
         time_region: &str,
+        project: &Option<String>,
     ) -> Vec<String> {
         match to {
             crate::packet::MessageTarget::Direct { username } => {
@@ -463,6 +470,7 @@ impl SwarmState {
                             timestamp,
                             datetime_utc: datetime_utc.to_string(),
                             time_region: time_region.to_string(),
+                            project: project.clone(),
                         })
                         .ok();
                 } else {
@@ -493,6 +501,7 @@ impl SwarmState {
                                 timestamp,
                                 datetime_utc: datetime_utc.to_string(),
                                 time_region: time_region.to_string(),
+                                project: project.clone(),
                             })
                             .ok();
                     } else {

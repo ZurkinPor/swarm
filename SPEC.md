@@ -109,13 +109,13 @@ Payloads larger than 256 bytes are automatically compressed with zstd level 11 b
 
 ## Packet Types
 
-24 packet types, each identified by a u8 type ID on the wire.
+27 packet types, each identified by a u8 type ID on the wire.
 
 ### Connection (1–3)
 
 | # | Type | Direction | Binary payload |
 |---|---|---|---|
-| 1 | `JOIN` | Client → Server | `flag(orchestrator) str8(username) opt_str16(role) u8(cap_count) [str16(cap)...] opt_str16(workspace) opt_str16(project_root)` |
+| 1 | `JOIN` | Client → Server | `flag(orchestrator) str8(username) opt_str16(role) u8(cap_count) [str16(cap)...] opt_str16(workspace) opt_str16(project_root) opt_str16(project)` |
 | 2 | `LEAVE` | Client → Server | `str8(username) opt_str16(reason)` |
 | 3 | `NOTIFY` | Server → Clients | `u8(event: 0–10)` + event-specific fields |
 
@@ -123,23 +123,23 @@ Notification events (type 3):
 
 | ID | Event | Extra fields |
 |---|---|---|
-| 0 | AgentJoined | `flag(orchestrator) str8(name) opt_str16(role) opt_str16(workspace) opt_str16(root)` |
+| 0 | AgentJoined | `flag(orchestrator) str8(name) opt_str16(role) opt_str16(workspace) opt_str16(root) opt_str16(project)` |
 | 1 | AgentLeft | `str8(name) opt_str16(reason)` |
-| 2 | TaskCreated | `uuid(id) str16(title) opt_str16(role)` |
+| 2 | TaskCreated | `uuid(id) str16(title) opt_str16(role) opt_str16(project)` |
 | 3 | TaskAssigned | `uuid(id) str8(username)` |
 | 4 | TaskCompleted | `uuid(id) str8(user) opt_str16(result) u8(n) [str16(artifact)...]` |
-| 5 | ChannelCreated | `uuid(id) str8(name) str8(creator) str8(visibility)` |
+| 5 | ChannelCreated | `uuid(id) str8(name) str8(creator) str8(visibility) opt_str16(project)` |
 | 6 | ChannelJoined | `str8(channel) str8(user)` |
 | 7 | ChannelLeft | `str8(channel) str8(user)` |
 | 8 | ChannelDeleted | `str8(channel) str8(deleted_by)` |
 | 9 | StatusUpdate | `str8(user) str8(status) flag+uuid?(task) flag+u8?(pct)` |
-| 10 | MessageReceived | `u64(timestamp) str8(datetime_utc) str8(time_region) str8(from) str8(to) str16(body)` |
+| 10 | MessageReceived | `u64(timestamp) str8(datetime_utc) str8(time_region) str8(from) str8(to) str16(body) opt_str16(project)` |
 
 ### Tasks (4–6, 13, 19)
 
 | # | Type | Direction | Binary payload |
 |---|---|---|---|
-| 4 | `CREATE_TASK` | Any → Server | `str16(title) str16(desc) u8(priority: 0–3) opt_str16(role) opt_str16(assign_to)` |
+| 4 | `CREATE_TASK` | Any → Server | `str16(title) str16(desc) u8(priority: 0–3) opt_str16(role) opt_str16(assign_to) opt_str16(project)` |
 | 5 | `TAKE_TASK` | Client → Server | `str8(username) u8(count) [uuid(id)...]` |
 | 6 | `STATUS` | Client → Server | `str8(user) u8(status: 0–3) flag+uuid?(task) flag+u8?(pct) opt_str16(msg)` |
 | 13 | `TASK_COMPLETE` | Client → Server | `uuid(id) str8(user) opt_str16(result) u8(n) [str16(artifact)...]` |
@@ -149,13 +149,13 @@ Notification events (type 3):
 
 | # | Type | Direction | Binary payload |
 |---|---|---|---|
-| 7 | `MESSAGE` | Any ↔ Any | `u64(timestamp) str8(datetime_utc) str8(time_region) str8(from) u8(target_type: 0=direct 1=channel) str8(target) str16(body)` |
+| 7 | `MESSAGE` | Any ↔ Any | `u64(timestamp) str8(datetime_utc) str8(time_region) str8(from) u8(target_type: 0=direct 1=channel) str8(target) str16(body) opt_str16(project)` |
 
 ### Channels (8, 14–18)
 
 | # | Type | Direction | Binary payload |
 |---|---|---|---|
-| 8 | `CREATE_CHANNEL` | Any → Server | `str8(name) str8(created_by) opt_str16(desc) str8(visibility)` |
+| 8 | `CREATE_CHANNEL` | Any → Server | `str8(name) str8(created_by) opt_str16(desc) str8(visibility) opt_str16(project)` |
 | 14 | `LIST_CHANNELS` | Client → Server | `str8(requester)` |
 | 15 | `JOIN_CHANNEL` | Client → Server | `str8(channel) str8(username)` |
 | 16 | `LEAVE_CHANNEL` | Client → Server | `str8(channel) str8(username)` |
@@ -180,11 +180,14 @@ Notification events (type 3):
 | 11 | `HTTP_REQUEST` | Client → Target | `str8(req) str8(target) u8(method: 0–6) str16(url) u8(n_headers) [(str16,str16)...] opt_str16(body) u8(n_params) [(str16,str16)...]` |
 | 12 | `TOOL_CALL` | Client → Target | `str8(req) str8(target) str8(tool_name) json(arguments)` |
 
-### Agent listing (24)
+### Agent listing + Sync (24–27)
 
 | # | Type | Direction | Binary payload |
 |---|---|---|---|
 | 24 | `LIST_USERS` | Client → Server | `str8(requester)` |
+| 25 | `SYNC_SCAN` | Client → Target | `str8(requester) str8(target) str16(project) u8(strategy: 0=newest 1=newest-server 2=interactive)` |
+| 26 | `SYNC_MANIFEST` | Target → Client | `str8(requester) str8(target) u32(file_count) [(str16(path) u64(size) [u8;20](sha1) u64(mtime_secs))...]` |
+| 27 | `SYNC_DONE` | Client → Server | `str8(requester) str8(target) u32(synced) u32(skipped) u32(conflicts)` |
 
 ### Enums
 
@@ -306,6 +309,76 @@ No separate client instance is needed — the server is a first-class swarm memb
 4. Remote execution is powerful — `TOOL_CALL` and `run_command` can execute arbitrary code on a remote machine. Only trusted agents should join the swarm.
 
 ---
+
+---
+
+## Project Isolation (`-p` / `--project`)
+
+Agents can opt into project-scoped context isolation with the `-p` flag:
+
+```bash
+./swarm serve -u hub -p myproject
+./swarm connect -s 127.0.0.1 -u alice -p myproject
+```
+
+| Scenario | Visibility |
+|---|---|
+| No `-p` set | See all messages, tasks, and channels (all projects + untagged) |
+| `-p myproject` | Only see messages/tasks/channels tagged `myproject` or untagged (None) |
+
+Project isolation applies to:
+- **Messages** — `MESSAGE` and `MessageReceived` carry `opt_str16(project)`
+- **Tasks** — `CREATE_TASK` and `TaskCreated` notify carry `opt_str16(project)`
+- **Channels** — `CREATE_CHANNEL` and `ChannelCreated` notify carry `opt_str16(project)`
+- **JOIN** — `opt_str16(project)` on the agent declares their project scope
+
+The sender's current project is automatically attached to all content they create. Untagged content (`project: None`) is visible to all agents regardless of their `-p` setting.
+
+---
+
+## Swarm Sync (#25–#27)
+
+Sync is a first-class swarm operation for moving entire project directories between computers — like an encrypted, swarm-native alternative to `rsync` or `git clone`. Every file is integrity-checked with SHA-1.
+
+### How Sync Works
+
+1. **SYNC_SCAN** (#25) — Requester asks target "give me a manifest of all files in this project" with a merge strategy
+2. **SYNC_MANIFEST** (#26) — Target walks its project directory, hashes every file with SHA-1, returns `(path, size, sha1, mtime)` for each
+3. Client compares local files with the remote manifest using `diff_manifests()`:
+   - Same SHA-1 → skip
+   - Only local → push to remote
+   - Only remote → pull from remote
+   - Both modified → apply **merge strategy**
+4. Files are transferred using existing `SEND_FILE` (#20) / `RECEIVE_FILE` (#21) packets
+5. **SYNC_DONE** (#27) — Final stats: files synced, skipped, conflicts
+
+### Merge Strategies
+
+| Strategy | Value | Behavior |
+|---|---|---|
+| `newest` | 0 | Keep newest file by mtime. Default if no flag. |
+| `newest-server` | 1 | Server (target) version always wins. |
+| `interactive` | 2 | Prompt for each conflict (defaults to newest in pipe mode). |
+
+### Sync Command
+
+```bash
+# Interactive mode
+swarm> sync alice myproject                  # newest wins
+swarm> sync alice myproject --newest-server  # server overrides
+swarm> sync alice myproject --interactive    # choose per conflict
+
+# Pipe mode
+{"cmd":"sync","target":"alice","project":"myproject","strategy":"newest-server"}
+```
+
+### SHA-1 Integrity
+
+Every file in a sync manifest includes a 20-byte SHA-1 hash. Before applying any sync operation, the receiving side verifies the hash matches. The hash covers the full file content and is computed via the `sha1` crate.
+
+### Skipped Directories
+
+The sync scanner automatically skips `.git`, `target`, `node_modules`, and `.swarm` directories to avoid syncing build artifacts and dependencies.
 
 ## Future Considerations
 

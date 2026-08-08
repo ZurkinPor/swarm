@@ -10,6 +10,8 @@ pub struct Agent {
     pub workspace_mode: Option<String>,
     /// Root directory if single-host mode
     pub project_root: Option<String>,
+    /// Project scope for context isolation
+    pub project: Option<String>,
     /// Whether this agent can assign tasks to others
     pub is_orchestrator: bool,
 }
@@ -21,6 +23,7 @@ impl Agent {
         capabilities: Vec<String>,
         workspace_mode: Option<String>,
         project_root: Option<String>,
+        project: Option<String>,
         is_orchestrator: bool,
     ) -> Self {
         Self {
@@ -29,6 +32,7 @@ impl Agent {
             capabilities,
             workspace_mode,
             project_root,
+            project,
             is_orchestrator,
         }
     }

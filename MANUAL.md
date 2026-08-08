@@ -77,6 +77,7 @@ Options:
       --workspace-mode <MODE>   "git" or "single-host" [default: git]
       --orchestrator            Run as task orchestrator
       --time-region <TZ>        Timezone label [default: UTC]
+  -p, --project <NAME>          Project scope for context isolation
 ```
 
 The server registers itself as an agent, handles routing, broadcasts notifications, and enforces orchestrator rules. The server also handles P2P operations locally — tool calls and file transfers targeting the server execute on the server machine itself.
@@ -99,6 +100,7 @@ Options:
       --orchestrator            Run as task orchestrator
       --time-region <TZ>        Timezone label [default: UTC]
       --pipe                    JSON stdin/stdout mode for AI harnesses
+  -p, --project <NAME>          Project scope for context isolation
 ```
 
 ### `gen-key` — Generate Encryption Key
@@ -280,6 +282,23 @@ swarm> btc bob 1 {"path":"test.txt","content":"binary tool call works!"}
 | Command | Description |
 |---|---|
 | `users` or `who` | List all connected agents with roles and orchestrator status |
+
+### Swarm Sync
+
+First-class sync operations for moving project directories between computers with SHA-1 integrity checking.
+
+| Command | Description |
+|---|---|
+| `sync <t> <project> [--strategy]` | Sync a project directory with a target agent |
+
+**Examples:**
+```
+swarm> sync alice myproject                         # newest file wins (default)
+swarm> sync alice myproject --newest-server          # server (target) overrides
+swarm> sync alice myproject --interactive            # prompt for each conflict
+```
+
+Sync works by walking the project directory, computing SHA-1 hashes for every file, and comparing manifests. Only changed files are transferred using existing SEND_FILE/RECEIVE_FILE packets. Skips `.git`, `target`, `node_modules`, and `.swarm` directories.
 
 ### Other
 
@@ -677,8 +696,44 @@ Use `tools-list` at the interactive prompt to see the full registry, or `{"cmd":
 | 22 | `DELETE_FILE` | Client → Target Agent |
 | 23 | `MAKE_DIR` | Client → Target Agent |
 | 24 | `LIST_USERS` | Client → Server |
+| 25 | `SYNC_SCAN` | Client → Target |
+| 26 | `SYNC_MANIFEST` | Target → Client |
+| 27 | `SYNC_DONE` | Client → Server |
 
 ---
+
+## Project Isolation (`-p`)
+
+Use `-p` / `--project` for context isolation:
+
+```bash
+./swarm serve -p myproject          # server scoped to myproject
+./swarm connect -s IP -u alice -p myproject   # client scoped to myproject
+```
+
+| `-p` set? | What you see |
+|---|---|
+| No | All messages, tasks, channels (all projects + untagged) |
+| Yes (`-p X`) | Only items tagged `X` or untagged (None) |
+
+Messages, tasks, and channels automatically carry the sender's project. Untagged items are visible to all projects.
+
+## Swarm Sync
+
+Sync entire project directories between computers with SHA-1 integrity verification:
+
+```
+swarm> sync bob myproject                    # newest wins
+swarm> sync bob myproject --newest-server     # server's version wins
+swarm> sync bob myproject --interactive       # prompt per conflict
+```
+
+Pipe mode:
+```json
+{"cmd":"sync","target":"bob","project":"myproject","strategy":"newest-server"}
+```
+
+The sync scanner walks directories, computes SHA-1 for each file, and compares manifests. Only changed files transfer. Directories `.git`, `target`, `node_modules`, `.swarm` are skipped automatically.
 
 ## Examples
 

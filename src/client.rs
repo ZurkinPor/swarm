@@ -22,14 +22,26 @@ pub async fn run_client(
     capabilities: Vec<String>,
     workspace_mode: String,
     project_root: Option<String>,
+    project: Option<String>,
     pipe_mode: bool,
     is_orchestrator: bool,
     time_region: String,
 ) -> anyhow::Result<()> {
     if pipe_mode {
-        run_pipe_mode(server_addr, crypto, username, role, capabilities, workspace_mode, project_root, is_orchestrator, time_region).await
+        run_pipe_mode(server_addr, crypto, username, role, capabilities, workspace_mode, project_root, project, is_orchestrator, time_region).await
     } else {
-        run_interactive(server_addr, crypto, username, role, capabilities, workspace_mode, project_root, is_orchestrator, time_region).await
+        run_interactive(server_addr, crypto, username, role, capabilities, workspace_mode, project_root, project, is_orchestrator, time_region).await
+    }
+}
+
+/// Shared project filter: if the client has a project set, only show events matching that project or None.
+fn project_matches(my_project: &Option<String>, event_project: &Option<String>) -> bool {
+    match my_project {
+        None => true, // No project filter — see everything
+        Some(p) => match event_project {
+            Some(ep) => ep == p,
+            None => true, // Untagged events are visible to all
+        },
     }
 }
 
@@ -43,6 +55,7 @@ async fn run_interactive(
     capabilities: Vec<String>,
     workspace_mode: String,
     project_root: Option<String>,
+    project: Option<String>,
     is_orchestrator: bool,
     time_region: String,
 ) -> anyhow::Result<()> {
@@ -62,9 +75,10 @@ async fn run_interactive(
     let join_packet = Packet::Join(packet::JoinPayload {
         username: username.clone(),
         role: role.clone(),
-        capabilities,
+        capabilities: capabilities.clone(),
         workspace_mode: Some(workspace_mode),
         project_root,
+        project: project.clone(),
         is_orchestrator,
     });
     send_packet(&writer, &crypto, &join_packet).await?;
@@ -75,6 +89,8 @@ async fn run_interactive(
     let crypto_cmd = crypto.clone();
     let username_clone = username.clone();
     let username_read = username.clone();
+    let project_clone = project.clone();
+    let project_read = project.clone(); // For read_handle closure
 
     // Heartbeat task
     let heartbeat_writer = writer.clone();
@@ -116,7 +132,7 @@ async fn run_interactive(
                     }
                     continue;
                 }
-                handle_incoming_packet(&packet, &username_read);
+                handle_incoming_packet(&packet, &username_read, &project_read);
                 continue;
             }
             // Then try JSON ResponsePacket (P2P replies)
@@ -147,7 +163,7 @@ async fn run_interactive(
             "quit" | "exit" => break,
             "help" => print_help(),
             _ => {
-                let packet = parse_command(line, &username_clone, &time_region);
+                let packet = parse_command(line, &username_clone, &time_region, &project_clone);
                 if let Some(p) = packet {
                     send_packet(&writer_clone, &crypto_cmd, &p).await?;
                 } else {
@@ -175,6 +191,7 @@ async fn run_pipe_mode(
     capabilities: Vec<String>,
     workspace_mode: String,
     project_root: Option<String>,
+    project: Option<String>,
     is_orchestrator: bool,
     time_region: String,
 ) -> anyhow::Result<()> {
@@ -187,7 +204,7 @@ async fn run_pipe_mode(
 
     let join_packet = Packet::Join(packet::JoinPayload {
         username: username.clone(), role: role.clone(), capabilities,
-        workspace_mode: Some(workspace_mode), project_root, is_orchestrator,
+        workspace_mode: Some(workspace_mode), project_root, project: project.clone(), is_orchestrator,
     });
     send_packet(&writer, &crypto, &join_packet).await?;
 
@@ -195,6 +212,7 @@ async fn run_pipe_mode(
     let writer_p2p = writer.clone();
     let crypto_read = crypto.clone();
     let username_read = username.clone();
+    let project_pipe = project.clone();
 
     let heartbeat_writer = writer.clone();
     let heartbeat_crypto = crypto.clone();
@@ -261,7 +279,7 @@ async fn run_pipe_mode(
         let cmd_type = cmd["cmd"].as_str().unwrap_or("");
         match cmd_type {
             "quit" | "exit" => break,
-            _ => match json_command_to_packet(&cmd, &username, &time_region) {
+            _ => match json_command_to_packet(&cmd, &username, &time_region, &project_pipe) {
                 Ok(Some(packet)) => send_packet(&writer, &crypto, &packet).await?,
                 Ok(None) => {},
                 Err(e) => println!("{}", serde_json::to_string(&json!({"type":"error","message":e})).unwrap()),
@@ -279,21 +297,21 @@ async fn run_pipe_mode(
 }
 
 /// Convert a JSON pipe command into a Packet.
-fn json_command_to_packet(cmd: &Value, username: &str, time_region: &str) -> Result<Option<Packet>, String> {
+fn json_command_to_packet(cmd: &Value, username: &str, time_region: &str, project: &Option<String>) -> Result<Option<Packet>, String> {
     let cmd_type = cmd["cmd"].as_str().unwrap_or("");
     match cmd_type {
         "msg" | "message" => {
             let target = cmd["target"].as_str().ok_or("'target' required")?;
             let body = cmd["body"].as_str().unwrap_or("");
             let to = if let Some(channel) = target.strip_prefix('#') { packet::MessageTarget::Channel { channel: channel.to_string() } } else { packet::MessageTarget::Direct { username: target.to_string() } };
-            let (ts, dt) = now_utc(); Ok(Some(Packet::Message(packet::MessagePayload { from: username.to_string(), to, body: body.to_string(), timestamp: ts, datetime_utc: dt, time_region: time_region.to_string() })))
+            let (ts, dt) = now_utc(); Ok(Some(Packet::Message(packet::MessagePayload { from: username.to_string(), to, body: body.to_string(), timestamp: ts, datetime_utc: dt, time_region: time_region.to_string(), project: project.clone() })))
         }
         "task" => {
             let title = cmd["title"].as_str().ok_or("'title' required")?;
             let description = cmd["description"].as_str().unwrap_or("").to_string();
             let priority = match cmd["priority"].as_str().unwrap_or("normal") { "low" => packet::TaskPriority::Low, "high" => packet::TaskPriority::High, "critical" => packet::TaskPriority::Critical, _ => packet::TaskPriority::Normal };
             let assigned_role = cmd["role"].as_str().map(|s| s.to_string());
-            Ok(Some(Packet::CreateTask(packet::CreateTaskPayload { title: title.to_string(), description, priority, assigned_role, assign_to: None })))
+            Ok(Some(Packet::CreateTask(packet::CreateTaskPayload { title: title.to_string(), description, priority, assigned_role, assign_to: None, project: project.clone() })))
         }
         "take" => {
             let task_id = cmd["task_id"].as_str().ok_or("'task_id' required")?;
@@ -319,7 +337,7 @@ fn json_command_to_packet(cmd: &Value, username: &str, time_region: &str) -> Res
             let name = cmd["name"].as_str().ok_or("'name' required")?;
             let description = cmd["description"].as_str().map(|s| s.to_string());
             let is_private = cmd["private"].as_bool().unwrap_or(false);
-            Ok(Some(Packet::CreateChannel(packet::CreateChannelPayload { name: name.to_string(), created_by: username.to_string(), description, visibility: Some(if is_private { "private".into() } else { "public".into() }) })))
+            Ok(Some(Packet::CreateChannel(packet::CreateChannelPayload { name: name.to_string(), created_by: username.to_string(), description, visibility: Some(if is_private { "private".into() } else { "public".into() }), project: project.clone() })))
         }
         "channels" => Ok(Some(Packet::ListChannels(packet::ListChannelsPayload { requester: username.to_string() }))),
         "users" | "who" => Ok(Some(Packet::ListUsers(packet::ListUsersPayload { requester: username.to_string() }))),
@@ -477,20 +495,28 @@ fn handle_response(resp: &ResponsePacket) {
     }
 }
 
-fn handle_incoming_packet(packet: &Packet, our_username: &str) {
+fn handle_incoming_packet(packet: &Packet, our_username: &str, our_project: &Option<String>) {
     match packet {
         Packet::Notify(n) => match n {
-            packet::NotifyPayload::AgentJoined { username, role, workspace_mode, project_root, is_orchestrator } => {
+            packet::NotifyPayload::AgentJoined { username, role, workspace_mode, project_root, project, is_orchestrator } => {
+                if !project_matches(our_project, project) { return; }
                 let mode_str = workspace_mode.as_deref().unwrap_or("git");
                 let root_str = project_root.as_ref().map(|r| format!(" root={}", r)).unwrap_or_default();
+                let proj_str = project.as_ref().map(|p| format!(" project={}", p)).unwrap_or_default();
                 let orch_str = if *is_orchestrator { " [ORCHESTRATOR]" } else { "" };
-                println!("[SWARM] Agent '{}' joined (role: {:?}, workspace: {}{}){}", username, role, mode_str, root_str, orch_str);
+                println!("[SWARM] Agent '{}' joined (role: {:?}, workspace: {}{}{}){}", username, role, mode_str, root_str, proj_str, orch_str);
             }
             packet::NotifyPayload::AgentLeft { username, reason } => println!("[SWARM] Agent '{}' left{}", username, reason.as_ref().map(|r| format!(" ({})", r)).unwrap_or_default()),
-            packet::NotifyPayload::TaskCreated { task_id, title, assigned_role } => println!("[SWARM] Task created: '{}' (id: {}) role: {:?}", title, task_id, assigned_role),
+            packet::NotifyPayload::TaskCreated { task_id, title, assigned_role, project } => {
+                if !project_matches(our_project, project) { return; }
+                println!("[SWARM] Task created: '{}' (id: {}) role: {:?} project: {:?}", title, task_id, assigned_role, project);
+            }
             packet::NotifyPayload::TaskAssigned { task_id, username } => println!("[SWARM] Task {} assigned to '{}'", task_id, username),
             packet::NotifyPayload::TaskCompleted { task_id, username, .. } => println!("[SWARM] Task {} completed by '{}'", task_id, username),
-            packet::NotifyPayload::ChannelCreated { name, created_by, visibility, .. } => println!("[SWARM] Channel '{}' created by '{}' ({})", name, created_by, visibility),
+            packet::NotifyPayload::ChannelCreated { name, created_by, visibility, project, .. } => {
+                if !project_matches(our_project, project) { return; }
+                println!("[SWARM] Channel '{}' created by '{}' ({}) project: {:?}", name, created_by, visibility, project);
+            }
             packet::NotifyPayload::ChannelJoined { channel_name, username } => println!("[SWARM] '{}' joined channel '{}'", username, channel_name),
             packet::NotifyPayload::ChannelLeft { channel_name, username } => println!("[SWARM] '{}' left channel '{}'", username, channel_name),
             packet::NotifyPayload::ChannelDeleted { channel_name, deleted_by } => println!("[SWARM] Channel '{}' deleted by '{}'", channel_name, deleted_by),
@@ -498,14 +524,20 @@ fn handle_incoming_packet(packet: &Packet, our_username: &str) {
                 let extra = if let (Some(tid), Some(pct)) = (task_id, progress_pct) { format!(" on task {} ({}%)", tid, pct) } else { String::new() };
                 println!("[SWARM] Agent '{}' is {}{}", username, status, extra);
             }
-            packet::NotifyPayload::MessageReceived { from, to, body, timestamp: _, datetime_utc, time_region } => if to == our_username { println!("[MSG from {}] [{} UTC] [{}] {}", from, datetime_utc, time_region, body); }
+            packet::NotifyPayload::MessageReceived { from, to, body, timestamp: _, datetime_utc, time_region, project } => {
+                if !project_matches(our_project, project) { return; }
+                if to == our_username { println!("[MSG from {}] [{} UTC] [{}] {}", from, datetime_utc, time_region, body); }
+            }
         },
-        Packet::Message(msg) => println!("[MSG] {} [{} UTC] [{}]: {}", msg.from, msg.datetime_utc, msg.time_region, msg.body),
+        Packet::Message(msg) => {
+            if !project_matches(our_project, &msg.project) { return; }
+            println!("[MSG] {} [{} UTC] [{}]: {}", msg.from, msg.datetime_utc, msg.time_region, msg.body);
+        }
         _ => {}
     }
 }
 
-fn parse_command(line: &str, username: &str, time_region: &str) -> Option<Packet> {
+fn parse_command(line: &str, username: &str, time_region: &str, project: &Option<String>) -> Option<Packet> {
     let parts: Vec<&str> = line.splitn(2, ' ').collect();
     let cmd = parts[0];
     let rest = if parts.len() > 1 { parts[1] } else { "" };
@@ -516,12 +548,12 @@ fn parse_command(line: &str, username: &str, time_region: &str) -> Option<Packet
             let target = sub.next()?;
             let body = sub.next().unwrap_or("");
             let to = if let Some(channel) = target.strip_prefix('#') { packet::MessageTarget::Channel { channel: channel.to_string() } } else { packet::MessageTarget::Direct { username: target.to_string() } };
-            let (ts, dt) = now_utc(); Some(Packet::Message(packet::MessagePayload { from: username.to_string(), to, body: body.to_string(), timestamp: ts, datetime_utc: dt, time_region: time_region.to_string() }))
+            let (ts, dt) = now_utc(); Some(Packet::Message(packet::MessagePayload { from: username.to_string(), to, body: body.to_string(), timestamp: ts, datetime_utc: dt, time_region: time_region.to_string(), project: project.clone() }))
         }
         "task" => {
             let mut role = None; let mut title = rest.to_string();
             if let Some(idx) = rest.rfind("role:") { role = Some(rest[idx + 5..].trim().to_string()); title = rest[..idx].trim().to_string(); }
-            Some(Packet::CreateTask(packet::CreateTaskPayload { title, description: String::new(), priority: packet::TaskPriority::Normal, assigned_role: role, assign_to: None }))
+            Some(Packet::CreateTask(packet::CreateTaskPayload { title, description: String::new(), priority: packet::TaskPriority::Normal, assigned_role: role, assign_to: None, project: project.clone() }))
         }
         "take" => { let task_id = uuid::Uuid::parse_str(rest.trim()).ok()?; Some(Packet::TakeTask(packet::TakeTaskPayload { task_ids: vec![task_id], username: username.to_string() })) }
         "assign" => {
@@ -538,7 +570,7 @@ fn parse_command(line: &str, username: &str, time_region: &str) -> Option<Packet
             let mut sub = clean.splitn(2, ' '); let name = sub.next().unwrap_or("").trim().to_string();
             let desc = sub.next().map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
             if name.is_empty() { return None; }
-            Some(Packet::CreateChannel(packet::CreateChannelPayload { name, created_by: username.to_string(), description: desc, visibility: Some(if is_private { "private".into() } else { "public".into() }) }))
+            Some(Packet::CreateChannel(packet::CreateChannelPayload { name, created_by: username.to_string(), description: desc, visibility: Some(if is_private { "private".into() } else { "public".into() }), project: project.clone() }))
         }
         "channels" | "list-channels" => Some(Packet::ListChannels(packet::ListChannelsPayload { requester: username.to_string() })),
         "users" | "who" => Some(Packet::ListUsers(packet::ListUsersPayload { requester: username.to_string() })),

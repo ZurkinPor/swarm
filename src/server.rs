@@ -199,6 +199,7 @@ async fn process_packet(
                 payload.capabilities.clone(),
                 payload.workspace_mode.clone(),
                 payload.project_root.clone(),
+                payload.project.clone(),
                 payload.is_orchestrator,
             );
             *username = Some(payload.username.clone());
@@ -305,7 +306,7 @@ async fn process_packet(
 
         Packet::Message(payload) => {
             let mut state = state.lock().await;
-            state.route_message(&payload.from, &payload.to, &payload.body, payload.timestamp, &payload.datetime_utc, &payload.time_region);
+            state.route_message(&payload.from, &payload.to, &payload.body, payload.timestamp, &payload.datetime_utc, &payload.time_region, &payload.project);
         }
 
         Packet::CreateChannel(payload) => {
@@ -585,6 +586,11 @@ async fn process_packet(
                 },
             )
             .await;
+        }
+
+        Packet::SyncScan(_) | Packet::SyncManifest(_) | Packet::SyncDone(_) => {
+            // Sync packets are P2P — forward to target
+            // (handled generically by forward_or_handle_locally or P2P handler on client)
         }
 
         Packet::ListUsers(payload) => {
