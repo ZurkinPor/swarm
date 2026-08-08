@@ -611,8 +611,18 @@ impl Packet {
 /// Check whether a file should be compressed based on its extension.
 /// Code, documents, and binaries compress well.
 /// Video, audio, image, and archive formats are already compressed.
+/// Extensionless files (Dockerfile, Makefile, LICENSE) and dotfiles
+/// (.gitignore, .env) are treated as text and compressed.
 pub fn is_compressible_file(path: &str) -> bool {
-    let ext = path.rsplit('.').next().unwrap_or("").to_lowercase();
+    // Extract filename (handle both / and \ path separators)
+    let name = path.rsplit(['/', '\\']).next().unwrap_or(path);
+
+    // Extensionless files and dotfiles are text — always compress
+    if !name.contains('.') || name.starts_with('.') {
+        return true;
+    }
+
+    let ext = name.rsplit('.').next().unwrap_or("").to_lowercase();
     match ext.as_str() {
         // ── Code files (text, high compression ratio) ──
         "rs" | "py" | "js" | "ts" | "jsx" | "tsx" | "c" | "cpp" | "cc" | "cxx" |
@@ -725,6 +735,17 @@ mod tests {
         assert!(is_compressible_file("library.dll"));
         assert!(is_compressible_file("data.json"));
         assert!(is_compressible_file("script.sh"));
+    }
+
+    #[test]
+    fn extensionless_and_dotfiles_compressible() {
+        assert!(is_compressible_file("Dockerfile"));
+        assert!(is_compressible_file("Makefile"));
+        assert!(is_compressible_file("LICENSE"));
+        assert!(is_compressible_file(".gitignore"));
+        assert!(is_compressible_file(".env"));
+        assert!(is_compressible_file("path/to/Dockerfile"));
+        assert!(is_compressible_file("src/.hidden"));
     }
 
     #[test]
