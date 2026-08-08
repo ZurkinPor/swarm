@@ -70,7 +70,7 @@ Share `swarm.key` with every agent that joins. All traffic is encrypted with thi
 
 Options:
   -u, --username <NAME>         Server node name [default: swarm-server]
-  -r, --role <ROLE>             Server role
+  -r, --role <ROLE>             Server role (short: -r developer)
   -p, --port <PORT>             Custom port [default: 6996]
   -k, --key-file <PATH>         Path to key file [default: swarm.key]
   -K <HEX>                      64-char hex key directly
@@ -90,7 +90,7 @@ Options:
   -s, --server <IP>             Server IP address (required)
       --server-port <PORT>      Server port [default: 6996]
   -u, --username <NAME>         Your agent name (required)
-  -r, --role <ROLE>             Your role (developer, researcher, etc.)
+  -r, --role <ROLE>             Your role (short: -r developer)
   -k, --key-file <PATH>         Path to key file [default: swarm.key]
   -K <HEX>                      64-char hex key directly
       --capabilities <LIST>     Comma-separated capabilities [default: general]
