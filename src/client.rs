@@ -400,6 +400,32 @@ fn json_command_to_packet(cmd: &Value, username: &str) -> Result<Option<Packet>,
         "http-get" => { let target = cmd["target"].as_str().ok_or("'target' required")?; let url = cmd["url"].as_str().ok_or("'url' required")?; let mut args = json!({"url":url}); if let Some(t) = cmd["timeout"].as_u64() { args["timeout"] = json!(t); } Ok(Some(Packet::ToolCall(packet::ToolCallPayload { requester: username.to_string(), target: target.to_string(), tool_name: "http_get".into(), arguments: args }))) }
         "list-drives" => { let target = cmd["target"].as_str().ok_or("'target' required")?; Ok(Some(Packet::ToolCall(packet::ToolCallPayload { requester: username.to_string(), target: target.to_string(), tool_name: "list_drives".into(), arguments: serde_json::Value::Object(Default::default()) }))) }
         "rm" | "delete" => { let target = cmd["target"].as_str().ok_or("'target' required")?; let path = cmd["path"].as_str().ok_or("'path' required")?; Ok(Some(Packet::ToolCall(packet::ToolCallPayload { requester: username.to_string(), target: target.to_string(), tool_name: "delete_file".into(), arguments: json!({"path":path}) }))) }
+        // ── FTP packet commands ──
+        "send" | "upload" => {
+            let target = cmd["target"].as_str().ok_or("'target' required")?;
+            let local_path = cmd["local"].as_str().ok_or("'local' path required")?;
+            let remote_path = cmd["remote"].as_str().ok_or("'remote' path required")?;
+            let overwrite = cmd["overwrite"].as_bool().unwrap_or(false);
+            let bytes = std::fs::read(local_path).map_err(|e| format!("Can't read local file: {}", e))?;
+            let b64 = base64_encode(&bytes);
+            Ok(Some(Packet::SendFile(packet::SendFilePayload { requester: username.to_string(), target: target.to_string(), path: remote_path.to_string(), content_b64: b64, overwrite })))
+        }
+        "recv" | "download" => {
+            let target = cmd["target"].as_str().ok_or("'target' required")?;
+            let path = cmd["path"].as_str().ok_or("'path' required")?;
+            let max_bytes = cmd["max_bytes"].as_u64();
+            Ok(Some(Packet::ReceiveFile(packet::ReceiveFilePayload { requester: username.to_string(), target: target.to_string(), path: path.to_string(), max_bytes })))
+        }
+        "rmfile" | "delete-file" => {
+            let target = cmd["target"].as_str().ok_or("'target' required")?;
+            let path = cmd["path"].as_str().ok_or("'path' required")?;
+            Ok(Some(Packet::DeleteFile(packet::DeleteFilePayload { requester: username.to_string(), target: target.to_string(), path: path.to_string() })))
+        }
+        "mkdir-ftp" | "make-dir-ftp" => {
+            let target = cmd["target"].as_str().ok_or("'target' required")?;
+            let path = cmd["path"].as_str().ok_or("'path' required")?;
+            Ok(Some(Packet::MakeDir(packet::MakeDirPayload { requester: username.to_string(), target: target.to_string(), path: path.to_string() })))
+        }
         "tools-list" | "tools_list" => { let tools: Vec<Value> = binary_tool::list_tools().iter().map(|(id, name, desc)| json!({"id":format!("0x{:02X}", id),"name":name,"description":desc})).collect(); println!("{}", serde_json::to_string(&json!({"type":"tool_list","tools":tools})).unwrap()); Ok(None) }
         _ => Ok(None),
     }
@@ -455,6 +481,29 @@ fn handle_p2p_request(packet: &Packet, our_username: &str) -> Option<ResponsePac
             eprintln!("[TOOL] {} from {} → {} ({})", payload.tool_name, payload.requester, if success { "OK" } else { "FAIL" }, output.chars().take(80).collect::<String>());
             Some(ResponsePacket::ToolCallResult { requester: payload.requester.clone(), tool_name: payload.tool_name.clone(), success, output })
         } else { None },
+        // ── Encrypted FTP ──
+        Packet::SendFile(payload) => if payload.target == our_username {
+            eprintln!("[FTP] Receiving file '{}' from {} ({} bytes b64)", payload.path, payload.requester, payload.content_b64.len());
+            match base64_decode_and_write(&payload.path, &payload.content_b64, payload.overwrite) {
+                Ok(bytes) => Some(ResponsePacket::SendFileResult { requester: payload.requester.clone(), path: payload.path.clone(), bytes_written: bytes }),
+                Err(e) => Some(ResponsePacket::Error { requester: payload.requester.clone(), message: e }),
+            }
+        } else { None },
+        Packet::ReceiveFile(payload) => if payload.target == our_username {
+            eprintln!("[FTP] Sending file '{}' to {}", payload.path, payload.requester);
+            match base64_encode_file(&payload.path, payload.max_bytes.unwrap_or(10_000_000)) {
+                Ok((b64, size)) => Some(ResponsePacket::ReceiveFileResult { requester: payload.requester.clone(), path: payload.path.clone(), content_b64: b64, size_bytes: size }),
+                Err(e) => Some(ResponsePacket::Error { requester: payload.requester.clone(), message: e }),
+            }
+        } else { None },
+        Packet::DeleteFile(payload) => if payload.target == our_username {
+            let deleted = std::fs::remove_file(&payload.path).is_ok();
+            Some(ResponsePacket::DeleteFileResult { requester: payload.requester.clone(), path: payload.path.clone(), deleted })
+        } else { None },
+        Packet::MakeDir(payload) => if payload.target == our_username {
+            let created = std::fs::create_dir_all(&payload.path).is_ok();
+            Some(ResponsePacket::MakeDirResult { requester: payload.requester.clone(), path: payload.path.clone(), created })
+        } else { None },
         _ => None,
     }
 }
@@ -467,6 +516,18 @@ fn handle_response(resp: &ResponsePacket) {
         ResponsePacket::ToolCallResult { tool_name, success, output, .. } => println!("[TOOL:{}] {}: {}", tool_name, if *success { "OK" } else { "FAILED" }, output),
         ResponsePacket::ChannelListResult { channels, .. } => if channels.is_empty() { println!("[CHANNELS] No visible channels."); } else { println!("[CHANNELS]"); for ch in channels { println!("  #{} ({} members, {} by {})", ch.name, ch.member_count, ch.visibility, ch.created_by); if let Some(desc) = &ch.description { if !desc.is_empty() { println!("    {}", desc); } } } }
         ResponsePacket::Error { message, .. } => println!("[ERROR] {}", message),
+        ResponsePacket::SendFileResult { path, bytes_written, .. } => println!("[FTP] Sent '{}' — {} bytes written", path, bytes_written),
+        ResponsePacket::ReceiveFileResult { path, content_b64, size_bytes, .. } => {
+            println!("[FTP] Received '{}' — {} bytes (b64: {} chars)", path, size_bytes, content_b64.len());
+            // Auto-decode and save to current directory
+            let local_name = std::path::Path::new(path).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| path.clone());
+            match base64_decode_and_write(&local_name, content_b64, true) {
+                Ok(written) => println!("[FTP] Decoded and saved as './{}' ({} bytes)", local_name, written),
+                Err(e) => eprintln!("[FTP] Failed to save received file: {}", e),
+            }
+        }
+        ResponsePacket::DeleteFileResult { path, deleted, .. } => println!("[FTP] Delete '{}': {}", path, if *deleted { "OK" } else { "FAILED (not found?)" }),
+        ResponsePacket::MakeDirResult { path, created, .. } => println!("[FTP] Mkdir '{}': {}", path, if *created { "OK" } else { "FAILED" }),
     }
 }
 
@@ -567,6 +628,25 @@ fn parse_command(line: &str, username: &str) -> Option<Packet> {
         "http-get" => { let mut sub = rest.splitn(2, ' '); let target = sub.next()?; let url = sub.next()?; Some(Packet::ToolCall(packet::ToolCallPayload { requester: username.to_string(), target: target.to_string(), tool_name: "http_get".into(), arguments: json!({"url":url}) })) }
         "list-drives" => { let target = rest.trim(); if target.is_empty() { return None; } Some(Packet::ToolCall(packet::ToolCallPayload { requester: username.to_string(), target: target.to_string(), tool_name: "list_drives".into(), arguments: serde_json::Value::Object(Default::default()) })) }
         "rm" | "delete" => { let mut sub = rest.splitn(2, ' '); let target = sub.next()?; let path = sub.next()?; Some(Packet::ToolCall(packet::ToolCallPayload { requester: username.to_string(), target: target.to_string(), tool_name: "delete_file".into(), arguments: json!({"path":path}) })) }
+        // ── FTP packet commands ──
+        "send" | "upload" => {
+            let mut sub = rest.splitn(3, ' '); let target = sub.next()?; let local = sub.next()?; let remote = sub.next()?;
+            let bytes = std::fs::read(local).map_err(|_| "can't read local file").ok()?;
+            let b64 = base64_encode(&bytes);
+            Some(Packet::SendFile(packet::SendFilePayload { requester: username.to_string(), target: target.to_string(), path: remote.to_string(), content_b64: b64, overwrite: false }))
+        }
+        "recv" | "download" => {
+            let mut sub = rest.splitn(2, ' '); let target = sub.next()?; let path = sub.next()?;
+            Some(Packet::ReceiveFile(packet::ReceiveFilePayload { requester: username.to_string(), target: target.to_string(), path: path.to_string(), max_bytes: None }))
+        }
+        "rmfile" | "delete-file" => {
+            let mut sub = rest.splitn(2, ' '); let target = sub.next()?; let path = sub.next()?;
+            Some(Packet::DeleteFile(packet::DeleteFilePayload { requester: username.to_string(), target: target.to_string(), path: path.to_string() }))
+        }
+        "mkdir-ftp" | "make-dir-ftp" => {
+            let mut sub = rest.splitn(2, ' '); let target = sub.next()?; let path = sub.next()?;
+            Some(Packet::MakeDir(packet::MakeDirPayload { requester: username.to_string(), target: target.to_string(), path: path.to_string() }))
+        }
         "tools-list" | "tools_list" => {
             println!("Binary Tool ID Registry:");
             println!("{:<6} {:<22} {}", "ID", "Name", "Description");
@@ -575,6 +655,74 @@ fn parse_command(line: &str, username: &str) -> Option<Packet> {
         }
         _ => None,
     }
+}
+
+// ── FTP helpers (base64 encode/decode) ──
+
+fn base64_decode_and_write(path: &str, b64: &str, overwrite: bool) -> Result<u64, String> {
+    if !overwrite && std::path::Path::new(path).exists() {
+        return Err(format!("File '{}' already exists. Use overwrite=true to replace.", path));
+    }
+    let bytes = base64_decode(b64)?;
+    if let Some(parent) = std::path::Path::new(path).parent() {
+        if !parent.as_os_str().is_empty() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+    }
+    std::fs::write(path, &bytes).map_err(|e| format!("Write failed: {}", e))?;
+    Ok(bytes.len() as u64)
+}
+
+fn base64_encode_file(path: &str, max_bytes: u64) -> Result<(String, u64), String> {
+    let bytes = std::fs::read(path).map_err(|e| format!("Read failed: {}", e))?;
+    if bytes.len() as u64 > max_bytes {
+        return Err(format!("File too large: {} bytes (max: {})", bytes.len(), max_bytes));
+    }
+    let b64 = base64_encode(&bytes);
+    Ok((b64, bytes.len() as u64))
+}
+
+/// Simple base64 encode (no external deps).
+fn base64_encode(data: &[u8]) -> String {
+    const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity((data.len() + 2) / 3 * 4);
+    for chunk in data.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = if chunk.len() > 1 { chunk[1] as u32 } else { 0 };
+        let b2 = if chunk.len() > 2 { chunk[2] as u32 } else { 0 };
+        let triple = (b0 << 16) | (b1 << 8) | b2;
+        out.push(CHARS[((triple >> 18) & 0x3F) as usize] as char);
+        out.push(CHARS[((triple >> 12) & 0x3F) as usize] as char);
+        out.push(if chunk.len() > 1 { CHARS[((triple >> 6) & 0x3F) as usize] as char } else { '=' });
+        out.push(if chunk.len() > 2 { CHARS[(triple & 0x3F) as usize] as char } else { '=' });
+    }
+    out
+}
+
+/// Simple base64 decode.
+fn base64_decode(data: &str) -> Result<Vec<u8>, String> {
+    let data = data.trim_end_matches('=');
+    let mut out = Vec::with_capacity(data.len() * 3 / 4);
+    let mut buf: u32 = 0;
+    let mut bits: u32 = 0;
+    for ch in data.chars() {
+        let val = match ch {
+            'A'..='Z' => ch as u32 - 'A' as u32,
+            'a'..='z' => ch as u32 - 'a' as u32 + 26,
+            '0'..='9' => ch as u32 - '0' as u32 + 52,
+            '+' => 62,
+            '/' => 63,
+            _ => return Err(format!("Invalid base64 char: {}", ch)),
+        };
+        buf = (buf << 6) | val;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((buf >> bits) as u8);
+            buf &= (1 << bits) - 1;
+        }
+    }
+    Ok(out)
 }
 
 fn list_local_dir(path: &str, recursive: bool) -> anyhow::Result<Vec<packet::DirEntry>> {
@@ -630,6 +778,11 @@ fn print_help() {
     println!("  http-get <t> <url>                  HTTP GET on a remote agent");
     println!("  list-drives <t>                     List drives on a remote agent (tool)");
     println!("  rm <t> <path>                       Delete a file on a remote agent");
+    println!("  Encrypted FTP (file transfer as packets):");
+    println!("  send <t> <local> <remote>           Upload a file to a remote agent");
+    println!("  recv <t> <remote_path>              Download a file from a remote agent");
+    println!("  rmfile <t> <path>                   Delete a file on a remote agent (packet)");
+    println!("  mkdir-ftp <t> <path>                Create directory on a remote agent (packet)");
     println!("  tools-list                          List all binary tool IDs");
     println!("  help                                Show this help");
     println!("  quit                                Leave the swarm");

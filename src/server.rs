@@ -545,6 +545,56 @@ async fn process_packet(
             )
             .await;
         }
+
+        // ── Encrypted FTP packets ──
+
+        Packet::SendFile(payload) => {
+            let requester = payload.requester.clone();
+            forward_or_handle_locally(
+                state, crypto, packet, &payload.target, &requester,
+                || ResponsePacket::Error {
+                    requester: requester.clone(),
+                    message: "SEND_FILE not handled on server".into(),
+                },
+            )
+            .await;
+        }
+
+        Packet::ReceiveFile(payload) => {
+            let requester = payload.requester.clone();
+            forward_or_handle_locally(
+                state, crypto, packet, &payload.target, &requester,
+                || ResponsePacket::Error {
+                    requester: requester.clone(),
+                    message: "RECEIVE_FILE not handled on server".into(),
+                },
+            )
+            .await;
+        }
+
+        Packet::DeleteFile(payload) => {
+            let requester = payload.requester.clone();
+            forward_or_handle_locally(
+                state, crypto, packet, &payload.target, &requester,
+                || ResponsePacket::Error {
+                    requester: requester.clone(),
+                    message: "DELETE_FILE not handled on server".into(),
+                },
+            )
+            .await;
+        }
+
+        Packet::MakeDir(payload) => {
+            let requester = payload.requester.clone();
+            forward_or_handle_locally(
+                state, crypto, packet, &payload.target, &requester,
+                || ResponsePacket::Error {
+                    requester: requester.clone(),
+                    message: "MAKE_DIR not handled on server".into(),
+                },
+            )
+            .await;
+        }
     }
 }
 
@@ -594,6 +644,10 @@ fn get_requester_from_response(resp: &ResponsePacket) -> String {
         | ResponsePacket::HttpRequestResult { requester, .. }
         | ResponsePacket::ToolCallResult { requester, .. }
         | ResponsePacket::ChannelListResult { requester, .. }
+        | ResponsePacket::SendFileResult { requester, .. }
+        | ResponsePacket::ReceiveFileResult { requester, .. }
+        | ResponsePacket::DeleteFileResult { requester, .. }
+        | ResponsePacket::MakeDirResult { requester, .. }
         | ResponsePacket::Error { requester, .. } => requester.clone(),
     }
 }

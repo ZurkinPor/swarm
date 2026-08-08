@@ -56,6 +56,16 @@ pub enum Packet {
     // --- Task assignment ---
     /// Orchestrator assigns a task directly to an agent.
     AssignTask(AssignTaskPayload),
+
+    // --- Encrypted FTP (file transfer as packets, not tools) ---
+    /// Push a file to another agent (base64-encoded content).
+    SendFile(SendFilePayload),
+    /// Pull a file from another agent.
+    ReceiveFile(ReceiveFilePayload),
+    /// Delete a file on another agent.
+    DeleteFile(DeleteFilePayload),
+    /// Create a directory on another agent.
+    MakeDir(MakeDirPayload),
 }
 
 // ── Payloads ────────────────────────────────────────────────
@@ -303,6 +313,45 @@ pub struct AssignTaskPayload {
     pub assign_to: String,
 }
 
+// ── Encrypted FTP payloads ──
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SendFilePayload {
+    pub requester: String,
+    pub target: String,
+    /// Destination path on the target agent.
+    pub path: String,
+    /// Base64-encoded file content.
+    pub content_b64: String,
+    /// Whether to overwrite if the file already exists.
+    #[serde(default)]
+    pub overwrite: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ReceiveFilePayload {
+    pub requester: String,
+    pub target: String,
+    /// Path on the target agent to read from.
+    pub path: String,
+    /// Maximum bytes to read (default: 10 MB).
+    pub max_bytes: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DeleteFilePayload {
+    pub requester: String,
+    pub target: String,
+    pub path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MakeDirPayload {
+    pub requester: String,
+    pub target: String,
+    pub path: String,
+}
+
 // ── Response packets ──
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -336,6 +385,27 @@ pub enum ResponsePacket {
     Error {
         requester: String,
         message: String,
+    },
+    SendFileResult {
+        requester: String,
+        path: String,
+        bytes_written: u64,
+    },
+    ReceiveFileResult {
+        requester: String,
+        path: String,
+        content_b64: String,
+        size_bytes: u64,
+    },
+    DeleteFileResult {
+        requester: String,
+        path: String,
+        deleted: bool,
+    },
+    MakeDirResult {
+        requester: String,
+        path: String,
+        created: bool,
     },
 }
 
@@ -378,6 +448,10 @@ impl Packet {
             Packet::ToolCall(_) => "TOOL_CALL",
             Packet::TaskComplete(_) => "TASK_COMPLETE",
             Packet::AssignTask(_) => "ASSIGN_TASK",
+            Packet::SendFile(_) => "SEND_FILE",
+            Packet::ReceiveFile(_) => "RECEIVE_FILE",
+            Packet::DeleteFile(_) => "DELETE_FILE",
+            Packet::MakeDir(_) => "MAKE_DIR",
         }
     }
 }
