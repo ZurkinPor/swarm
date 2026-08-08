@@ -135,11 +135,13 @@ async fn main() -> anyhow::Result<()> {
             {
                 let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
                 let mut s = state.lock().await;
+                let mut caps = vec!["server".into()];
+                if orchestrator { caps.push("orchestrator".into()); }
                 s.add_agent(
                     crate::agent::Agent::new(
                         username.clone(),
                         role.clone(),
-                        vec!["server".into(), "orchestrator".into()],
+                        caps,
                         Some(workspace_mode.clone()),
                         None,
                         orchestrator,

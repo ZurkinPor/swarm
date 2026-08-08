@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::time::Instant;
 use tokio::sync::broadcast;
 use tokio::sync::mpsc;
 use uuid::Uuid;
@@ -37,6 +38,11 @@ pub struct SwarmState {
     pub connections: HashMap<String, ConnectionHandle>,
     /// Offline message queue: username → list of queued messages.
     pub mailbox: HashMap<String, Vec<QueuedMessage>>,
+    /// Task creation timestamps for collision-avoidance grace period.
+    task_creation_times: HashMap<Uuid, Instant>,
+    /// Seconds to wait after task creation before anyone can take it
+    /// (lets all agents see the notification first).
+    pub task_grace_secs: u64,
 }
 
 impl SwarmState {
@@ -50,6 +56,8 @@ impl SwarmState {
             broadcast_tx,
             connections: HashMap::new(),
             mailbox: HashMap::new(),
+            task_creation_times: HashMap::new(),
+            task_grace_secs: 2,
         }
     }
 
@@ -141,6 +149,7 @@ impl SwarmState {
                 assigned_role: task.assigned_role.clone(),
             })
             .ok();
+        self.task_creation_times.insert(task.id, Instant::now());
         self.tasks.insert(task.id, task.clone());
         task
     }
@@ -203,9 +212,24 @@ impl SwarmState {
     pub fn take_task(&mut self, username: &str, task_ids: &[Uuid]) -> (Vec<Uuid>, Vec<Uuid>) {
         let mut taken = Vec::new();
         let mut not_found = Vec::new();
+        // Check orchestrator status before the mutable borrow loop
+        let skip_grace = self.has_orchestrator();
+        let grace_secs = self.task_grace_secs;
         for &task_id in task_ids {
             if let Some(task) = self.tasks.get_mut(&task_id) {
                 if task.status == TaskStatus::Pending {
+                    // Grace period: if no orchestrator, wait before allowing take
+                    // so all agents see the notification first
+                    if !skip_grace {
+                        if let Some(created) = self.task_creation_times.get(&task_id) {
+                            let elapsed = created.elapsed().as_secs();
+                            if elapsed < grace_secs {
+                                // Still in grace period — skip this task silently
+                                // (it's not an error, just not ready yet)
+                                continue;
+                            }
+                        }
+                    }
                     task.status = TaskStatus::InProgress;
                     task.assignees.push(username.to_string());
                     self.broadcast_tx
@@ -234,6 +258,7 @@ impl SwarmState {
             task.status = TaskStatus::Completed;
             task.result = result.clone();
             task.artifacts = artifacts.clone();
+            self.task_creation_times.remove(&task_id);
             self.broadcast_tx
                 .send(NotifyPayload::TaskCompleted {
                     task_id,
