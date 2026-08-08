@@ -14,6 +14,13 @@ pub struct ConnectionHandle {
     pub tx: mpsc::UnboundedSender<Vec<u8>>,
 }
 
+/// A message queued for offline delivery.
+#[derive(Debug, Clone)]
+pub struct QueuedMessage {
+    pub from: String,
+    pub body: String,
+}
+
 /// Central swarm state shared by the server.
 pub struct SwarmState {
     /// Connected agents by username.
@@ -28,6 +35,8 @@ pub struct SwarmState {
     pub broadcast_tx: broadcast::Sender<NotifyPayload>,
     /// Per-client connection handles for P2P routing.
     pub connections: HashMap<String, ConnectionHandle>,
+    /// Offline message queue: username → list of queued messages.
+    pub mailbox: HashMap<String, Vec<QueuedMessage>>,
 }
 
 impl SwarmState {
@@ -40,6 +49,7 @@ impl SwarmState {
             statuses: HashMap::new(),
             broadcast_tx,
             connections: HashMap::new(),
+            mailbox: HashMap::new(),
         }
     }
 
@@ -64,6 +74,18 @@ impl SwarmState {
                 message: None,
             },
         );
+        // Deliver any queued offline messages
+        if let Some(queued) = self.mailbox.remove(&agent.username) {
+            for msg in queued {
+                self.broadcast_tx
+                    .send(NotifyPayload::MessageReceived {
+                        from: msg.from,
+                        to: agent.username.clone(),
+                        body: msg.body,
+                    })
+                    .ok();
+            }
+        }
         self.connections.insert(agent.username.clone(), conn);
         self.agents.insert(agent.username.clone(), agent);
     }
@@ -345,13 +367,24 @@ impl SwarmState {
     ) -> Vec<String> {
         match to {
             crate::packet::MessageTarget::Direct { username } => {
-                self.broadcast_tx
-                    .send(NotifyPayload::MessageReceived {
-                        from: from.to_string(),
-                        to: username.clone(),
-                        body: body.to_string(),
-                    })
-                    .ok();
+                if self.connections.contains_key(username) {
+                    self.broadcast_tx
+                        .send(NotifyPayload::MessageReceived {
+                            from: from.to_string(),
+                            to: username.clone(),
+                            body: body.to_string(),
+                        })
+                        .ok();
+                } else {
+                    // Queue for offline delivery
+                    self.mailbox
+                        .entry(username.clone())
+                        .or_default()
+                        .push(QueuedMessage {
+                            from: from.to_string(),
+                            body: body.to_string(),
+                        });
+                }
                 vec![username.clone()]
             }
             crate::packet::MessageTarget::Channel { channel } => {
@@ -361,13 +394,23 @@ impl SwarmState {
                     .map(|ch| ch.members.iter().filter(|m| *m != from).cloned().collect())
                     .unwrap_or_default();
                 for recipient in &recipients {
-                    self.broadcast_tx
-                        .send(NotifyPayload::MessageReceived {
-                            from: from.to_string(),
-                            to: recipient.clone(),
-                            body: body.to_string(),
-                        })
-                        .ok();
+                    if self.connections.contains_key(recipient) {
+                        self.broadcast_tx
+                            .send(NotifyPayload::MessageReceived {
+                                from: from.to_string(),
+                                to: recipient.clone(),
+                                body: body.to_string(),
+                            })
+                            .ok();
+                    } else {
+                        self.mailbox
+                            .entry(recipient.clone())
+                            .or_default()
+                            .push(QueuedMessage {
+                                from: from.to_string(),
+                                body: body.to_string(),
+                            });
+                    }
                 }
                 recipients
             }
