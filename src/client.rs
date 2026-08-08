@@ -71,7 +71,7 @@ async fn run_interactive(
     let username_clone = username.clone();
     let username_read = username.clone();
 
-    // Heartbeat task: send STATUS every 30s to keep connection alive
+    // Heartbeat task
     let heartbeat_writer = writer.clone();
     let heartbeat_crypto = crypto.clone();
     let heartbeat_username = username.clone();
@@ -107,7 +107,7 @@ async fn run_interactive(
                     continue;
                 }
             };
-            // ── Detect binary tool call (magic byte 0x01) ──
+            // ── Detect binary tool call ──
             if crate::binary_tool::is_binary_tool_call(&decrypted) {
                 match crate::binary_tool::decode_binary_tool_call(&decrypted) {
                     Ok(Some(btc)) => {
@@ -209,7 +209,7 @@ async fn run_interactive(
     Ok(())
 }
 
-// ── Pipe mode (JSON stdin/stdout for AI harnesses) ──
+// ── Pipe mode ──
 
 async fn run_pipe_mode(
     server_addr: SocketAddr,
@@ -229,7 +229,6 @@ async fn run_pipe_mode(
     let writer = Arc::new(Mutex::new(writer));
     let mut framed = FramedRead::new(reader, FrameCodec);
 
-    // Send JOIN
     let join_packet = Packet::Join(packet::JoinPayload {
         username: username.clone(),
         role: role.clone(),
@@ -239,14 +238,12 @@ async fn run_pipe_mode(
     });
     send_packet(&writer, &crypto, &join_packet).await?;
 
-    // Channel for the read task to send events to the main loop
     let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel::<serde_json::Value>();
 
     let writer_p2p = writer.clone();
     let crypto_read = crypto.clone();
     let username_read = username.clone();
 
-    // Heartbeat task for pipe mode
     let heartbeat_writer = writer.clone();
     let heartbeat_crypto = crypto.clone();
     let heartbeat_username = username.clone();
@@ -266,7 +263,6 @@ async fn run_pipe_mode(
         }
     });
 
-    // Spawn read task — forwards incoming packets as JSON events
     let _read_handle = tokio::spawn(async move {
         while let Some(frame_result) = framed.next().await {
             let encrypted = match frame_result {
@@ -277,7 +273,6 @@ async fn run_pipe_mode(
                 Ok(d) => d,
                 Err(_) => continue,
             };
-            // ── Detect binary tool call (magic byte 0x01) ──
             if crate::binary_tool::is_binary_tool_call(&decrypted) {
                 match crate::binary_tool::decode_binary_tool_call(&decrypted) {
                     Ok(Some(btc)) => {
@@ -299,7 +294,6 @@ async fn run_pipe_mode(
                                 let _ = w.flush().await;
                             }
                         }
-                        // Emit as event too
                         let _ = event_tx.send(json!({"type":"binary_tool_call","data":{"tool_id":format!("0x{:02X}", btc.tool_id),"tool_name":crate::binary_tool::tool_id_to_name(btc.tool_id),"target":btc.target,"requester":btc.requester,"arguments":btc.arguments}}));
                         continue;
                     }
@@ -331,17 +325,14 @@ async fn run_pipe_mode(
         }
     });
 
-    // Signal ready
     let ready = json!({"type":"ready","username":username});
     println!("{}", serde_json::to_string(&ready).unwrap());
 
-    // Read JSON commands from stdin, one per line
     let stdin = tokio::io::stdin();
     let mut buf = String::new();
     let mut stdin_reader = tokio::io::BufReader::new(stdin);
 
     loop {
-        // Check for incoming events first (non-blocking)
         while let Ok(event) = event_rx.try_recv() {
             println!("{}", serde_json::to_string(&event).unwrap());
         }
@@ -359,7 +350,6 @@ async fn run_pipe_mode(
             continue;
         }
 
-        // Parse JSON command
         let cmd: Value = match serde_json::from_str(line) {
             Ok(v) => v,
             Err(e) => {
@@ -377,9 +367,7 @@ async fn run_pipe_mode(
                     Ok(Some(packet)) => {
                         send_packet_or_binary(&writer, &crypto, &packet).await?;
                     }
-                    Ok(None) => {
-                        // Unknown command, ignore
-                    }
+                    Ok(None) => {}
                     Err(e) => {
                         println!("{}", serde_json::to_string(&json!({"type":"error","message":e})).unwrap());
                     }
@@ -388,7 +376,6 @@ async fn run_pipe_mode(
         }
     }
 
-    // Drain remaining events
     while let Ok(event) = event_rx.try_recv() {
         println!("{}", serde_json::to_string(&event).unwrap());
     }
@@ -403,7 +390,7 @@ async fn run_pipe_mode(
     Ok(())
 }
 
-/// Convert a JSON pipe command into a Packet. Returns Ok(None) for unknown commands.
+/// Convert a JSON pipe command into a Packet.
 fn json_command_to_packet(cmd: &Value, username: &str) -> Result<Option<Packet>, String> {
     let cmd_type = cmd["cmd"].as_str().unwrap_or("");
     match cmd_type {
@@ -416,9 +403,7 @@ fn json_command_to_packet(cmd: &Value, username: &str) -> Result<Option<Packet>,
                 packet::MessageTarget::Direct { username: target.to_string() }
             };
             Ok(Some(Packet::Message(packet::MessagePayload {
-                from: username.to_string(),
-                to,
-                body: body.to_string(),
+                from: username.to_string(), to, body: body.to_string(),
             })))
         }
         "task" => {
@@ -432,39 +417,29 @@ fn json_command_to_packet(cmd: &Value, username: &str) -> Result<Option<Packet>,
             };
             let assigned_role = cmd["role"].as_str().map(|s| s.to_string());
             Ok(Some(Packet::CreateTask(packet::CreateTaskPayload {
-                title: title.to_string(),
-                description,
-                priority,
-                assigned_role,
-                assign_to: None,
+                title: title.to_string(), description, priority, assigned_role, assign_to: None,
             })))
         }
         "take" => {
             let task_id = cmd["task_id"].as_str().ok_or("'task_id' required")?;
             let id = uuid::Uuid::parse_str(task_id).map_err(|e| e.to_string())?;
             Ok(Some(Packet::TakeTask(packet::TakeTaskPayload {
-                task_ids: vec![id],
-                username: username.to_string(),
+                task_ids: vec![id], username: username.to_string(),
             })))
         }
         "done" => {
             let task_id = cmd["task_id"].as_str().ok_or("'task_id' required")?;
             let id = uuid::Uuid::parse_str(task_id).map_err(|e| e.to_string())?;
             Ok(Some(Packet::TaskComplete(packet::TaskCompletePayload {
-                task_id: id,
-                username: username.to_string(),
-                result: cmd["result"].as_str().map(|s| s.to_string()),
-                artifacts: vec![],
+                task_id: id, username: username.to_string(),
+                result: cmd["result"].as_str().map(|s| s.to_string()), artifacts: vec![],
             })))
         }
         "status" => {
             let msg = cmd["message"].as_str().unwrap_or("").to_string();
             Ok(Some(Packet::Status(packet::StatusPayload {
-                username: username.to_string(),
-                status: packet::AgentStatus::Working,
-                task_id: None,
-                progress_pct: None,
-                message: Some(msg),
+                username: username.to_string(), status: packet::AgentStatus::Working,
+                task_id: None, progress_pct: None, message: Some(msg),
             })))
         }
         "channel" => {
@@ -472,81 +447,50 @@ fn json_command_to_packet(cmd: &Value, username: &str) -> Result<Option<Packet>,
             let description = cmd["description"].as_str().map(|s| s.to_string());
             let is_private = cmd["private"].as_bool().unwrap_or(false);
             Ok(Some(Packet::CreateChannel(packet::CreateChannelPayload {
-                name: name.to_string(),
-                created_by: username.to_string(),
-                description,
+                name: name.to_string(), created_by: username.to_string(), description,
                 visibility: Some(if is_private { "private".into() } else { "public".into() }),
             })))
         }
         "channels" => {
-            Ok(Some(Packet::ListChannels(packet::ListChannelsPayload {
-                requester: username.to_string(),
-            })))
+            Ok(Some(Packet::ListChannels(packet::ListChannelsPayload { requester: username.to_string() })))
         }
         "join" => {
             let name = cmd["name"].as_str().ok_or("'name' required")?;
-            Ok(Some(Packet::JoinChannel(packet::JoinChannelPayload {
-                channel_name: name.to_string(),
-                username: username.to_string(),
-            })))
+            Ok(Some(Packet::JoinChannel(packet::JoinChannelPayload { channel_name: name.to_string(), username: username.to_string() })))
         }
         "leave" => {
             let name = cmd["name"].as_str().ok_or("'name' required")?;
-            Ok(Some(Packet::LeaveChannel(packet::LeaveChannelPayload {
-                channel_name: name.to_string(),
-                username: username.to_string(),
-            })))
+            Ok(Some(Packet::LeaveChannel(packet::LeaveChannelPayload { channel_name: name.to_string(), username: username.to_string() })))
         }
         "delete-channel" => {
             let name = cmd["name"].as_str().ok_or("'name' required")?;
-            Ok(Some(Packet::DeleteChannel(packet::DeleteChannelPayload {
-                channel_name: name.to_string(),
-                requested_by: username.to_string(),
-            })))
+            Ok(Some(Packet::DeleteChannel(packet::DeleteChannelPayload { channel_name: name.to_string(), requested_by: username.to_string() })))
         }
         "hide" => {
             let name = cmd["name"].as_str().ok_or("'name' required")?;
-            Ok(Some(Packet::HideChannel(packet::HideChannelPayload {
-                channel_name: name.to_string(),
-                username: username.to_string(),
-            })))
+            Ok(Some(Packet::HideChannel(packet::HideChannelPayload { channel_name: name.to_string(), username: username.to_string() })))
         }
         "drives" => {
             let target = cmd["target"].as_str().ok_or("'target' required")?;
-            Ok(Some(Packet::ListDrives(packet::ListDrivesPayload {
-                requester: username.to_string(),
-                target: target.to_string(),
-            })))
+            Ok(Some(Packet::ListDrives(packet::ListDrivesPayload { requester: username.to_string(), target: target.to_string() })))
         }
         "ls" | "dir" => {
             let target = cmd["target"].as_str().ok_or("'target' required")?;
             let path = cmd["path"].as_str().unwrap_or(".");
-            Ok(Some(Packet::ListDir(packet::ListDirPayload {
-                requester: username.to_string(),
-                target: target.to_string(),
-                path: path.to_string(),
-                recursive: false,
-            })))
+            Ok(Some(Packet::ListDir(packet::ListDirPayload { requester: username.to_string(), target: target.to_string(), path: path.to_string(), recursive: false })))
         }
         "http" => {
             let target = cmd["target"].as_str().ok_or("'target' required")?;
             let method_str = cmd["method"].as_str().unwrap_or("GET");
             let url = cmd["url"].as_str().ok_or("'url' required")?;
             let method = match method_str.to_uppercase().as_str() {
-                "GET" => packet::HttpMethod::GET,
-                "POST" => packet::HttpMethod::POST,
-                "PUT" => packet::HttpMethod::PUT,
-                "DELETE" => packet::HttpMethod::DELETE,
+                "GET" => packet::HttpMethod::GET, "POST" => packet::HttpMethod::POST,
+                "PUT" => packet::HttpMethod::PUT, "DELETE" => packet::HttpMethod::DELETE,
                 _ => return Err(format!("Unknown method: {}", method_str)),
             };
             Ok(Some(Packet::HttpRequest(packet::HttpRequestPayload {
-                requester: username.to_string(),
-                target: target.to_string(),
-                method,
-                url: url.to_string(),
-                headers: vec![],
-                body: cmd["body"].as_str().map(|s| s.to_string()),
-                query_params: vec![],
+                requester: username.to_string(), target: target.to_string(), method,
+                url: url.to_string(), headers: vec![], body: cmd["body"].as_str().map(|s| s.to_string()), query_params: vec![],
             })))
         }
         "tool" => {
@@ -554,37 +498,123 @@ fn json_command_to_packet(cmd: &Value, username: &str) -> Result<Option<Packet>,
             let tool_name = cmd["tool_name"].as_str().ok_or("'tool_name' required")?;
             let arguments = cmd.get("args").cloned().unwrap_or(serde_json::Value::Object(Default::default()));
             Ok(Some(Packet::ToolCall(packet::ToolCallPayload {
-                requester: username.to_string(),
-                target: target.to_string(),
-                tool_name: tool_name.to_string(),
-                arguments,
+                requester: username.to_string(), target: target.to_string(), tool_name: tool_name.to_string(), arguments,
             })))
         }
         "btc" | "binary-tool" => {
             let target = cmd["target"].as_str().ok_or("'target' required")?;
-            // Accept decimal or hex (0x prefix) tool ID
             let tool_id: u8 = if let Some(v) = cmd["tool_id"].as_u64() {
                 v as u8
             } else if let Some(s) = cmd["tool_id"].as_str() {
                 if let Some(hex) = s.strip_prefix("0x") {
                     u8::from_str_radix(hex, 16).map_err(|e| e.to_string())?
-                } else {
-                    s.parse().map_err(|e| format!("Invalid tool_id: {}", e))?
-                }
-            } else {
-                return Err("'tool_id' required (numeric byte value, e.g. 1 or 0x80)".into());
-            };
+                } else { s.parse().map_err(|e| format!("Invalid tool_id: {}", e))? }
+            } else { return Err("'tool_id' required (e.g. 1 or 0x80)".into()); };
             let args = cmd.get("args").cloned().unwrap_or(serde_json::Value::Object(Default::default()));
             let args_json = serde_json::to_string(&args).map_err(|e| e.to_string())?;
             Ok(Some(Packet::ToolCall(packet::ToolCallPayload {
-                requester: username.to_string(),
-                target: target.to_string(),
+                requester: username.to_string(), target: target.to_string(),
                 tool_name: format!("__binary_0x{:02X}__", tool_id),
                 arguments: serde_json::json!({"__binary":true,"tool_id":tool_id,"args_json":args_json}),
             })))
         }
+        // ── Convenience commands that map to tools ──
+        "cp" | "copy" => {
+            let target = cmd["target"].as_str().ok_or("'target' required")?;
+            let src = cmd["src"].as_str().ok_or("'src' required")?;
+            let dst = cmd["dst"].as_str().ok_or("'dst' required")?;
+            Ok(Some(Packet::ToolCall(packet::ToolCallPayload {
+                requester: username.to_string(), target: target.to_string(),
+                tool_name: "copy_file".into(),
+                arguments: json!({"src":src,"dst":dst}),
+            })))
+        }
+        "mv" | "move" => {
+            let target = cmd["target"].as_str().ok_or("'target' required")?;
+            let src = cmd["src"].as_str().ok_or("'src' required")?;
+            let dst = cmd["dst"].as_str().ok_or("'dst' required")?;
+            Ok(Some(Packet::ToolCall(packet::ToolCallPayload {
+                requester: username.to_string(), target: target.to_string(),
+                tool_name: "move_file".into(),
+                arguments: json!({"src":src,"dst":dst}),
+            })))
+        }
+        "size" | "file-size" => {
+            let target = cmd["target"].as_str().ok_or("'target' required")?;
+            let path = cmd["path"].as_str().ok_or("'path' required")?;
+            Ok(Some(Packet::ToolCall(packet::ToolCallPayload {
+                requester: username.to_string(), target: target.to_string(),
+                tool_name: "file_size".into(),
+                arguments: json!({"path":path}),
+            })))
+        }
+        "env" | "env-var" => {
+            let target = cmd["target"].as_str().ok_or("'target' required")?;
+            let name = cmd["name"].as_str();
+            let mut args = json!({});
+            if let Some(n) = name { args["name"] = json!(n); }
+            Ok(Some(Packet::ToolCall(packet::ToolCallPayload {
+                requester: username.to_string(), target: target.to_string(),
+                tool_name: "env_var".into(), arguments: args,
+            })))
+        }
+        "sleep" => {
+            let target = cmd["target"].as_str().ok_or("'target' required")?;
+            let ms = cmd["ms"].as_u64().unwrap_or(1000);
+            Ok(Some(Packet::ToolCall(packet::ToolCallPayload {
+                requester: username.to_string(), target: target.to_string(),
+                tool_name: "sleep".into(),
+                arguments: json!({"ms":ms}),
+            })))
+        }
+        "whoami" => {
+            let target = cmd["target"].as_str().ok_or("'target' required")?;
+            Ok(Some(Packet::ToolCall(packet::ToolCallPayload {
+                requester: username.to_string(), target: target.to_string(),
+                tool_name: "whoami".into(),
+                arguments: serde_json::Value::Object(Default::default()),
+            })))
+        }
+        "todos" => {
+            let target = cmd["target"].as_str().ok_or("'target' required")?;
+            let path = cmd["path"].as_str().unwrap_or("TODO.md");
+            let title = cmd["title"].as_str().unwrap_or("# TODO");
+            let todos = cmd.get("todos").cloned().unwrap_or(json!([]));
+            Ok(Some(Packet::ToolCall(packet::ToolCallPayload {
+                requester: username.to_string(), target: target.to_string(),
+                tool_name: "write_todos".into(),
+                arguments: json!({"path":path,"title":title,"todos":todos}),
+            })))
+        }
+        "mkdir" | "make-dir" => {
+            let target = cmd["target"].as_str().ok_or("'target' required")?;
+            let path = cmd["path"].as_str().ok_or("'path' required")?;
+            Ok(Some(Packet::ToolCall(packet::ToolCallPayload {
+                requester: username.to_string(), target: target.to_string(),
+                tool_name: "create_dir".into(),
+                arguments: json!({"path":path}),
+            })))
+        }
+        "http-get" => {
+            let target = cmd["target"].as_str().ok_or("'target' required")?;
+            let url = cmd["url"].as_str().ok_or("'url' required")?;
+            let timeout = cmd["timeout"].as_u64();
+            let mut args = json!({"url":url});
+            if let Some(t) = timeout { args["timeout"] = json!(t); }
+            Ok(Some(Packet::ToolCall(packet::ToolCallPayload {
+                requester: username.to_string(), target: target.to_string(),
+                tool_name: "http_get".into(), arguments: args,
+            })))
+        }
+        "list-drives" => {
+            let target = cmd["target"].as_str().ok_or("'target' required")?;
+            Ok(Some(Packet::ToolCall(packet::ToolCallPayload {
+                requester: username.to_string(), target: target.to_string(),
+                tool_name: "list_drives".into(),
+                arguments: serde_json::Value::Object(Default::default()),
+            })))
+        }
         "tools-list" | "tools_list" => {
-            // Return tool list as a special response — pipe mode caller prints it
             let tools: Vec<Value> = binary_tool::list_tools().iter().map(|(id, name, desc)| {
                 json!({"id":format!("0x{:02X}", id),"name":name,"description":desc})
             }).collect();
@@ -612,8 +642,6 @@ async fn send_packet(
     Ok(())
 }
 
-/// Like send_packet, but if the packet is a ToolCall with a __binary marker,
-/// encodes it using the compact binary wire format instead of JSON.
 async fn send_packet_or_binary(
     writer: &Mutex<impl AsyncWriteExt + Unpin>,
     crypto: &Crypto,
@@ -623,16 +651,8 @@ async fn send_packet_or_binary(
         if payload.arguments.get("__binary").and_then(|v| v.as_bool()) == Some(true) {
             let tool_id = payload.arguments["tool_id"].as_u64().unwrap_or(0) as u8;
             let args_json = payload.arguments["args_json"].as_str().unwrap_or("{}");
-            eprintln!(
-                "[BINARY-SEND] tool 0x{:02X} → {}",
-                tool_id, payload.target
-            );
-            let raw = binary_tool::encode_binary_tool_call(
-                tool_id,
-                &payload.target,
-                &payload.requester,
-                args_json,
-            );
+            eprintln!("[BINARY-SEND] tool 0x{:02X} → {}", tool_id, payload.target);
+            let raw = binary_tool::encode_binary_tool_call(tool_id, &payload.target, &payload.requester, args_json);
             let encrypted = crypto.encrypt(&raw)?;
             let mut w = writer.lock().await;
             let len = encrypted.len() as u32;
@@ -645,63 +665,35 @@ async fn send_packet_or_binary(
     send_packet(writer, crypto, packet).await
 }
 
-fn handle_p2p_request(
-    packet: &Packet,
-    our_username: &str,
-) -> Option<ResponsePacket> {
+fn handle_p2p_request(packet: &Packet, our_username: &str) -> Option<ResponsePacket> {
     match packet {
         Packet::ListDrives(payload) => {
             if payload.target == our_username {
-                Some(ResponsePacket::ListDrivesResult {
-                    requester: payload.requester.clone(),
-                    drives: list_local_drives(),
-                })
-            } else {
-                None
-            }
+                let drives = if cfg!(windows) {
+                    ('A'..='Z').map(|c| format!("{}:\\", c)).filter(|d| std::path::Path::new(d).exists()).collect()
+                } else { vec!["/".to_string()] };
+                Some(ResponsePacket::ListDrivesResult { requester: payload.requester.clone(), drives })
+            } else { None }
         }
         Packet::ListDir(payload) => {
             if payload.target == our_username {
                 match list_local_dir(&payload.path, payload.recursive) {
-                    Ok(entries) => Some(ResponsePacket::ListDirResult {
-                        requester: payload.requester.clone(),
-                        path: payload.path.clone(),
-                        entries,
-                    }),
-                    Err(e) => Some(ResponsePacket::Error {
-                        requester: payload.requester.clone(),
-                        message: format!("Failed to list directory: {}", e),
-                    }),
+                    Ok(entries) => Some(ResponsePacket::ListDirResult { requester: payload.requester.clone(), path: payload.path.clone(), entries }),
+                    Err(e) => Some(ResponsePacket::Error { requester: payload.requester.clone(), message: format!("Failed to list directory: {}", e) }),
                 }
-            } else {
-                None
-            }
+            } else { None }
         }
         Packet::HttpRequest(payload) => {
             if payload.target == our_username {
-                Some(ResponsePacket::HttpRequestResult {
-                    requester: payload.requester.clone(),
-                    status_code: 501,
-                    headers: vec![],
-                    body: "HTTP forwarding not yet implemented".into(),
-                })
-            } else {
-                None
-            }
+                Some(ResponsePacket::HttpRequestResult { requester: payload.requester.clone(), status_code: 501, headers: vec![], body: "HTTP forwarding not yet implemented".into() })
+            } else { None }
         }
         Packet::ToolCall(payload) => {
             if payload.target == our_username {
                 let (success, output) = crate::tools::execute_tool(&payload.tool_name, &payload.arguments);
                 eprintln!("[TOOL] {} from {} → {} ({})", payload.tool_name, payload.requester, if success { "OK" } else { "FAIL" }, output.chars().take(80).collect::<String>());
-                Some(ResponsePacket::ToolCallResult {
-                    requester: payload.requester.clone(),
-                    tool_name: payload.tool_name.clone(),
-                    success,
-                    output,
-                })
-            } else {
-                None
-            }
+                Some(ResponsePacket::ToolCallResult { requester: payload.requester.clone(), tool_name: payload.tool_name.clone(), success, output })
+            } else { None }
         }
         _ => None,
     }
@@ -709,9 +701,7 @@ fn handle_p2p_request(
 
 fn handle_response(resp: &ResponsePacket) {
     match resp {
-        ResponsePacket::ListDrivesResult { drives, .. } => {
-            println!("[DRIVES] {}", drives.join(", "));
-        }
+        ResponsePacket::ListDrivesResult { drives, .. } => { println!("[DRIVES] {}", drives.join(", ")); }
         ResponsePacket::ListDirResult { path, entries, .. } => {
             println!("[DIR] {}:", path);
             for entry in entries {
@@ -723,32 +713,23 @@ fn handle_response(resp: &ResponsePacket) {
             println!("[HTTP] Status: {}", status_code);
             let preview: String = body.chars().take(500).collect();
             println!("[HTTP] Body: {}", preview);
-            if body.len() > 500 {
-                println!("... ({} more chars)", body.len() - 500);
-            }
+            if body.len() > 500 { println!("... ({} more chars)", body.len() - 500); }
         }
         ResponsePacket::ToolCallResult { tool_name, success, output, .. } => {
             let status = if *success { "OK" } else { "FAILED" };
             println!("[TOOL:{}] {}: {}", tool_name, status, output);
         }
         ResponsePacket::ChannelListResult { channels, .. } => {
-            if channels.is_empty() {
-                println!("[CHANNELS] No visible channels.");
-            } else {
+            if channels.is_empty() { println!("[CHANNELS] No visible channels."); }
+            else {
                 println!("[CHANNELS]");
                 for ch in channels {
                     println!("  #{} ({} members, {} by {})", ch.name, ch.member_count, ch.visibility, ch.created_by);
-                    if let Some(desc) = &ch.description {
-                        if !desc.is_empty() {
-                            println!("    {}", desc);
-                        }
-                    }
+                    if let Some(desc) = &ch.description { if !desc.is_empty() { println!("    {}", desc); } }
                 }
             }
         }
-        ResponsePacket::Error { message, .. } => {
-            println!("[ERROR] {}", message);
-        }
+        ResponsePacket::Error { message, .. } => { println!("[ERROR] {}", message); }
     }
 }
 
@@ -791,14 +772,10 @@ fn handle_incoming_packet(packet: &Packet, our_username: &str) {
                 println!("[SWARM] Agent '{}' is {}{}", username, status, extra);
             }
             packet::NotifyPayload::MessageReceived { from, to, body } => {
-                if to == our_username {
-                    println!("[MSG from {}] {}", from, body);
-                }
+                if to == our_username { println!("[MSG from {}] {}", from, body); }
             }
         },
-        Packet::Message(msg) => {
-            println!("[MSG] {}: {}", msg.from, msg.body);
-        }
+        Packet::Message(msg) => { println!("[MSG] {}: {}", msg.from, msg.body); }
         _ => {}
     }
 }
@@ -815,9 +792,7 @@ fn parse_command(line: &str, username: &str) -> Option<Packet> {
             let body = sub.next().unwrap_or("");
             let to = if let Some(channel) = target.strip_prefix('#') {
                 packet::MessageTarget::Channel { channel: channel.to_string() }
-            } else {
-                packet::MessageTarget::Direct { username: target.to_string() }
-            };
+            } else { packet::MessageTarget::Direct { username: target.to_string() } };
             Some(Packet::Message(packet::MessagePayload { from: username.to_string(), to, body: body.to_string() }))
         }
         "task" => {
@@ -892,10 +867,8 @@ fn parse_command(line: &str, username: &str) -> Option<Packet> {
             let method = sub.next().unwrap_or("GET");
             let url = sub.next().unwrap_or("");
             let method = match method.to_uppercase().as_str() {
-                "GET" => packet::HttpMethod::GET,
-                "POST" => packet::HttpMethod::POST,
-                "PUT" => packet::HttpMethod::PUT,
-                "DELETE" => packet::HttpMethod::DELETE,
+                "GET" => packet::HttpMethod::GET, "POST" => packet::HttpMethod::POST,
+                "PUT" => packet::HttpMethod::PUT, "DELETE" => packet::HttpMethod::DELETE,
                 _ => return None,
             };
             Some(Packet::HttpRequest(packet::HttpRequestPayload { requester: username.to_string(), target: target.to_string(), method, url: url.to_string(), headers: vec![], body: None, query_params: vec![] }))
@@ -909,24 +882,114 @@ fn parse_command(line: &str, username: &str) -> Option<Packet> {
             Some(Packet::ToolCall(packet::ToolCallPayload { requester: username.to_string(), target: target.to_string(), tool_name: tool_name.to_string(), arguments }))
         }
         "btc" | "binary-tool" => {
-            // Format: btc <target> <tool_id> <json_args>
-            // tool_id can be decimal (e.g. 1) or hex (e.g. 0x80)
             let mut sub = rest.splitn(3, ' ');
             let target = sub.next()?;
             let id_str = sub.next()?;
             let args_str = sub.next().unwrap_or("{}");
             let tool_id: u8 = if let Some(hex) = id_str.strip_prefix("0x") {
                 u8::from_str_radix(hex, 16).ok()?
-            } else {
-                id_str.parse().ok()?
-            };
+            } else { id_str.parse().ok()? };
             let args: serde_json::Value = serde_json::from_str(args_str).ok()?;
             let args_json = serde_json::to_string(&args).ok()?;
             Some(Packet::ToolCall(packet::ToolCallPayload {
-                requester: username.to_string(),
-                target: target.to_string(),
+                requester: username.to_string(), target: target.to_string(),
                 tool_name: format!("__binary_0x{:02X}__", tool_id),
                 arguments: serde_json::json!({"__binary":true,"tool_id":tool_id,"args_json":args_json}),
+            }))
+        }
+        // ── Convenience commands that map to tools ──
+        "cp" | "copy" => {
+            let mut sub = rest.splitn(3, ' ');
+            let target = sub.next()?;
+            let src = sub.next()?;
+            let dst = sub.next()?;
+            Some(Packet::ToolCall(packet::ToolCallPayload {
+                requester: username.to_string(), target: target.to_string(),
+                tool_name: "copy_file".into(), arguments: json!({"src":src,"dst":dst}),
+            }))
+        }
+        "mv" | "move" => {
+            let mut sub = rest.splitn(3, ' ');
+            let target = sub.next()?;
+            let src = sub.next()?;
+            let dst = sub.next()?;
+            Some(Packet::ToolCall(packet::ToolCallPayload {
+                requester: username.to_string(), target: target.to_string(),
+                tool_name: "move_file".into(), arguments: json!({"src":src,"dst":dst}),
+            }))
+        }
+        "size" => {
+            let mut sub = rest.splitn(2, ' ');
+            let target = sub.next()?;
+            let path = sub.next()?;
+            Some(Packet::ToolCall(packet::ToolCallPayload {
+                requester: username.to_string(), target: target.to_string(),
+                tool_name: "file_size".into(), arguments: json!({"path":path}),
+            }))
+        }
+        "env" => {
+            let mut sub = rest.splitn(2, ' ');
+            let target = sub.next()?;
+            let name = sub.next();
+            let mut args = json!({});
+            if let Some(n) = name { args["name"] = json!(n); }
+            Some(Packet::ToolCall(packet::ToolCallPayload {
+                requester: username.to_string(), target: target.to_string(),
+                tool_name: "env_var".into(), arguments: args,
+            }))
+        }
+        "sleep" => {
+            let mut sub = rest.splitn(2, ' ');
+            let target = sub.next()?;
+            let ms: u64 = sub.next()?.parse().ok()?;
+            Some(Packet::ToolCall(packet::ToolCallPayload {
+                requester: username.to_string(), target: target.to_string(),
+                tool_name: "sleep".into(), arguments: json!({"ms":ms}),
+            }))
+        }
+        "whoami" => {
+            let target = rest.trim();
+            if target.is_empty() { return None; }
+            Some(Packet::ToolCall(packet::ToolCallPayload {
+                requester: username.to_string(), target: target.to_string(),
+                tool_name: "whoami".into(), arguments: serde_json::Value::Object(Default::default()),
+            }))
+        }
+        "todos" => {
+            let mut sub = rest.splitn(2, ' ');
+            let target = sub.next()?;
+            let todo_args = sub.next().unwrap_or("[]");
+            let todos: Value = serde_json::from_str(todo_args).ok()?;
+            Some(Packet::ToolCall(packet::ToolCallPayload {
+                requester: username.to_string(), target: target.to_string(),
+                tool_name: "write_todos".into(),
+                arguments: json!({"path":"TODO.md","todos":todos}),
+            }))
+        }
+        "mkdir" | "make-dir" => {
+            let mut sub = rest.splitn(2, ' ');
+            let target = sub.next()?;
+            let path = sub.next()?;
+            Some(Packet::ToolCall(packet::ToolCallPayload {
+                requester: username.to_string(), target: target.to_string(),
+                tool_name: "create_dir".into(), arguments: json!({"path":path}),
+            }))
+        }
+        "http-get" => {
+            let mut sub = rest.splitn(2, ' ');
+            let target = sub.next()?;
+            let url = sub.next()?;
+            Some(Packet::ToolCall(packet::ToolCallPayload {
+                requester: username.to_string(), target: target.to_string(),
+                tool_name: "http_get".into(), arguments: json!({"url":url}),
+            }))
+        }
+        "list-drives" => {
+            let target = rest.trim();
+            if target.is_empty() { return None; }
+            Some(Packet::ToolCall(packet::ToolCallPayload {
+                requester: username.to_string(), target: target.to_string(),
+                tool_name: "list_drives".into(), arguments: serde_json::Value::Object(Default::default()),
             }))
         }
         "tools-list" | "tools_list" => {
@@ -935,24 +998,12 @@ fn parse_command(line: &str, username: &str) -> Option<Packet> {
             for (id, name, desc) in binary_tool::list_tools() {
                 println!("0x{:02X}   {:<22} {}", id, name, desc);
             }
-            // Return a benign status so caller doesn't print "Unknown command"
             Some(Packet::Status(packet::StatusPayload {
-                username: username.to_string(),
-                status: packet::AgentStatus::Idle,
-                task_id: None,
-                progress_pct: None,
-                message: None,
+                username: username.to_string(), status: packet::AgentStatus::Idle,
+                task_id: None, progress_pct: None, message: None,
             }))
         }
         _ => None,
-    }
-}
-
-fn list_local_drives() -> Vec<String> {
-    if cfg!(windows) {
-        ('A'..='Z').map(|c| format!("{}:\\", c)).filter(|d| std::path::Path::new(d).exists()).collect()
-    } else {
-        vec!["/".to_string()]
     }
 }
 
@@ -1003,6 +1054,17 @@ fn print_help() {
     println!("  http <t> <method> <url>             Send HTTP request via remote agent");
     println!("  tool <t> <name> [args]              Invoke a tool on a remote agent");
     println!("  btc <t> <id> [args]                 Binary tool call (byte ID)");
+    println!("  Tools (invoke on remote agents):");
+    println!("  cp <t> <src> <dst>                  Copy a file on a remote agent");
+    println!("  mv <t> <src> <dst>                  Move/rename a file on a remote agent");
+    println!("  size <t> <path>                     Get file size on a remote agent");
+    println!("  env <t> [name]                      Get env var on a remote agent");
+    println!("  sleep <t> <ms>                      Pause a remote agent for N ms");
+    println!("  whoami <t>                          Get hostname/user of a remote agent");
+    println!("  todos <t> [json_array]              Write TODO.md on a remote agent");
+    println!("  mkdir <t> <path>                    Create directory on a remote agent");
+    println!("  http-get <t> <url>                  HTTP GET on a remote agent");
+    println!("  list-drives <t>                     List drives on a remote agent (tool)");
     println!("  tools-list                          List all binary tool IDs");
     println!("  help                                Show this help");
     println!("  quit                                Leave the swarm");

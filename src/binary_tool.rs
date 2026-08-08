@@ -18,37 +18,50 @@
 //!
 //! Total per-tool-call overhead: 12 bytes + target + requester.
 //!
-//! ## Tool Registry
+//! ## Full Tool Registry (37 tools)
 //!
-//! | ID    | Name                | Category    |
-//! |-------|---------------------|-------------|
-//! | 0x01  | write_file          | file        |
-//! | 0x02  | read_file           | file        |
-//! | 0x03  | run_command         | shell       |
-//! | 0x04  | list_dir            | file        |
-//! | 0x05  | create_dir          | file        |
-//! | 0x06  | delete_file         | file        |
-//! | 0x07  | file_exists         | file        |
-//! | 0x80  | spawn_agents        | ai-orch     |
-//! | 0x81  | read_files          | ai-context  |
-//! | 0x82  | read_subtree        | ai-context  |
-//! | 0x83  | write_todos         | ai-plan     |
-//! | 0x84  | suggest_followups   | ai-ux       |
-//! | 0x85  | str_replace         | ai-edit     |
-//! | 0x86  | ask_user            | ai-ux       |
-//! | 0x87  | read_url            | ai-web      |
-//! | 0x88  | render_ui           | ai-ux       |
-//! | 0x89  | gravity_index       | ai-services |
-//! | 0x8A  | file_picker         | ai-context  |
-//! | 0x8B  | code_searcher       | ai-context  |
-//! | 0x8C  | researcher_web      | ai-web      |
-//! | 0x8D  | researcher_docs     | ai-web      |
-//! | 0x8E  | basher              | ai-shell    |
-//! | 0x8F  | tmux_cli            | ai-shell    |
-//! | 0x90  | browser_use         | ai-browser  |
-//! | 0x91  | code_reviewer       | ai-review   |
-//! | 0x92  | thinker             | ai-think    |
-//! | 0x93  | glob                | ai-context  |
+//! ### Built-in Tools (0x01–0x0F): file system + shell + system
+//! | ID   | Name         | Args                          |
+//! |------|--------------|-------------------------------|
+//! | 0x01 | write_file   | path, content                 |
+//! | 0x02 | read_file    | path, max_bytes?              |
+//! | 0x03 | run_command  | command, cwd?, timeout?       |
+//! | 0x04 | list_dir     | path, recursive?              |
+//! | 0x05 | create_dir   | path                          |
+//! | 0x06 | delete_file  | path                          |
+//! | 0x07 | file_exists  | path                          |
+//! | 0x08 | list_drives  | —                             |
+//! | 0x09 | http_get     | url, timeout?, insecure?      |
+//! | 0x0A | copy_file    | src, dst                      |
+//! | 0x0B | move_file    | src, dst                      |
+//! | 0x0C | file_size    | path                          |
+//! | 0x0D | env_var      | name? (omit to list all)      |
+//! | 0x0E | sleep        | ms (max 60000)                |
+//! | 0x0F | whoami       | —                             |
+//!
+//! ### AI Assistant Tools (0x80–0x93)
+//! | ID   | Name              | Category    |
+//! |------|-------------------|-------------|
+//! | 0x80 | spawn_agents      | ai-orch     |
+//! | 0x81 | read_files        | ai-context  |
+//! | 0x82 | read_subtree      | ai-context  |
+//! | 0x83 | write_todos       | ai-plan     |
+//! | 0x84 | suggest_followups | ai-ux       |
+//! | 0x85 | str_replace       | ai-edit     |
+//! | 0x86 | ask_user          | ai-ux       |
+//! | 0x87 | read_url          | ai-web      |
+//! | 0x88 | render_ui         | ai-ux       |
+//! | 0x89 | gravity_index     | ai-services |
+//! | 0x8A | file_picker       | ai-context  |
+//! | 0x8B | code_searcher     | ai-context  |
+//! | 0x8C | researcher_web    | ai-web      |
+//! | 0x8D | researcher_docs   | ai-web      |
+//! | 0x8E | basher            | ai-shell    |
+//! | 0x8F | tmux_cli          | ai-shell    |
+//! | 0x90 | browser_use       | ai-browser  |
+//! | 0x91 | code_reviewer     | ai-review   |
+//! | 0x92 | thinker           | ai-think    |
+//! | 0x93 | glob              | ai-context  |
 
 use serde_json::Value;
 
@@ -162,6 +175,7 @@ pub fn decode_binary_tool_call(data: &[u8]) -> Result<Option<BinaryToolCall>, St
 /// Map a tool ID byte to its canonical name.
 pub fn tool_id_to_name(id: u8) -> &'static str {
     match id {
+        // Built-in (0x01–0x0F)
         0x01 => "write_file",
         0x02 => "read_file",
         0x03 => "run_command",
@@ -169,6 +183,15 @@ pub fn tool_id_to_name(id: u8) -> &'static str {
         0x05 => "create_dir",
         0x06 => "delete_file",
         0x07 => "file_exists",
+        0x08 => "list_drives",
+        0x09 => "http_get",
+        0x0A => "copy_file",
+        0x0B => "move_file",
+        0x0C => "file_size",
+        0x0D => "env_var",
+        0x0E => "sleep",
+        0x0F => "whoami",
+        // AI assistant (0x80–0x93)
         0x80 => "spawn_agents",
         0x81 => "read_files",
         0x82 => "read_subtree",
@@ -201,9 +224,17 @@ pub fn tool_name_to_id(name: &str) -> Option<u8> {
         "read_file" => Some(0x02),
         "run_command" | "run_cmd" | "shell" => Some(0x03),
         "list_dir" | "ls" => Some(0x04),
-        "create_dir" | "mkdir" => Some(0x05),
+        "create_dir" | "mkdir" | "make_dir" => Some(0x05),
         "delete_file" | "rm" => Some(0x06),
         "file_exists" => Some(0x07),
+        "list_drives" | "drives" => Some(0x08),
+        "http_get" => Some(0x09),
+        "copy_file" | "cp" => Some(0x0A),
+        "move_file" | "mv" | "rename" => Some(0x0B),
+        "file_size" => Some(0x0C),
+        "env_var" | "get_env" => Some(0x0D),
+        "sleep" => Some(0x0E),
+        "whoami" => Some(0x0F),
         "spawn_agents" => Some(0x80),
         "read_files" => Some(0x81),
         "read_subtree" => Some(0x82),
@@ -233,16 +264,24 @@ pub fn tool_name_to_id(name: &str) -> Option<u8> {
 pub fn list_tools() -> Vec<(u8, &'static str, &'static str)> {
     vec![
         (0x01, "write_file", "Create or overwrite a file"),
-        (0x02, "read_file", "Read one or more files from disk"),
+        (0x02, "read_file", "Read a file from disk"),
         (0x03, "run_command", "Execute a shell command"),
         (0x04, "list_dir", "List files and directories"),
         (0x05, "create_dir", "Create directories recursively"),
         (0x06, "delete_file", "Delete a file"),
         (0x07, "file_exists", "Check whether a path exists"),
+        (0x08, "list_drives", "List mounted drives/volumes"),
+        (0x09, "http_get", "Perform an HTTP GET request"),
+        (0x0A, "copy_file", "Copy a file from src to dst"),
+        (0x0B, "move_file", "Move or rename a file"),
+        (0x0C, "file_size", "Get the size of a file"),
+        (0x0D, "env_var", "Get an environment variable"),
+        (0x0E, "sleep", "Pause for N milliseconds"),
+        (0x0F, "whoami", "Return hostname and username"),
         (0x80, "spawn_agents", "Spawn specialized sub-agents"),
         (0x81, "read_files", "Read files with parsed metadata"),
         (0x82, "read_subtree", "Read a directory tree blob"),
-        (0x83, "write_todos", "Track objectives via step-by-step plan"),
+        (0x83, "write_todos", "Write a structured TODO.md file"),
         (0x84, "suggest_followups", "Suggest next-step followup actions"),
         (0x85, "str_replace", "Edit files with exact-string replacement"),
         (0x86, "ask_user", "Ask the user multiple-choice questions"),
@@ -294,6 +333,15 @@ mod tests {
     }
 
     #[test]
+    fn roundtrip_high_id() {
+        // Test with a high-ID AI tool
+        let encoded = encode_binary_tool_call(0x83, "agent", "buffy", r#"{"todos":[]}"#);
+        let decoded = decode_binary_tool_call(&encoded).unwrap().unwrap();
+        assert_eq!(decoded.tool_id, 0x83);
+        assert_eq!(tool_id_to_name(0x83), "write_todos");
+    }
+
+    #[test]
     fn magic_detection() {
         assert!(is_binary_tool_call(&[0x01]));
         assert!(is_binary_tool_call(&[0x01, 0x02, 0x00]));
@@ -325,7 +373,21 @@ mod tests {
         assert_eq!(tool_name_to_id("ls"), Some(0x04));
         assert_eq!(tool_name_to_id("create_dir"), Some(0x05));
         assert_eq!(tool_name_to_id("mkdir"), Some(0x05));
+        assert_eq!(tool_name_to_id("make_dir"), Some(0x05));
         assert_eq!(tool_name_to_id("delete_file"), Some(0x06));
         assert_eq!(tool_name_to_id("rm"), Some(0x06));
+        assert_eq!(tool_name_to_id("copy_file"), Some(0x0A));
+        assert_eq!(tool_name_to_id("cp"), Some(0x0A));
+        assert_eq!(tool_name_to_id("move_file"), Some(0x0B));
+        assert_eq!(tool_name_to_id("mv"), Some(0x0B));
+        assert_eq!(tool_name_to_id("rename"), Some(0x0B));
+    }
+
+    #[test]
+    fn all_builtin_ids_known() {
+        for id in 0x01u8..=0x0Fu8 {
+            let name = tool_id_to_name(id);
+            assert!(name != "unknown", "ID 0x{:02X} should be known", id);
+        }
     }
 }
