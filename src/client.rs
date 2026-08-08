@@ -615,14 +615,9 @@ fn parse_command(line: &str, username: &str) -> Option<Packet> {
         "sleep" => { let mut sub = rest.splitn(2, ' '); let target = sub.next()?; let ms: u64 = sub.next()?.parse().ok()?; Some(Packet::ToolCall(packet::ToolCallPayload { requester: username.to_string(), target: target.to_string(), tool_name: "sleep".into(), arguments: json!({"ms":ms}) })) }
         "whoami" => { let target = rest.trim(); if target.is_empty() { return None; } Some(Packet::ToolCall(packet::ToolCallPayload { requester: username.to_string(), target: target.to_string(), tool_name: "whoami".into(), arguments: serde_json::Value::Object(Default::default()) })) }
         "todos" => { let mut sub = rest.splitn(2, ' '); let target = sub.next()?; let todo_args = sub.next().unwrap_or("[]"); let todos: Value = serde_json::from_str(todo_args).ok()?; Some(Packet::ToolCall(packet::ToolCallPayload { requester: username.to_string(), target: target.to_string(), tool_name: "write_todos".into(), arguments: json!({"path":"TODO.md","todos":todos}) })) }
-        "mkdir" | "make-dir" => {
-            let mut sub = rest.splitn(2, ' '); let target = sub.next()?; let path = sub.next()?;
-            Some(Packet::MakeDir(packet::MakeDirPayload { requester: username.to_string(), target: target.to_string(), path: path.to_string() }))
-        }
         "http-get" => { let mut sub = rest.splitn(2, ' '); let target = sub.next()?; let url = sub.next()?; Some(Packet::ToolCall(packet::ToolCallPayload { requester: username.to_string(), target: target.to_string(), tool_name: "http_get".into(), arguments: json!({"url":url}) })) }
         "list-drives" => { let target = rest.trim(); if target.is_empty() { return None; } Some(Packet::ToolCall(packet::ToolCallPayload { requester: username.to_string(), target: target.to_string(), tool_name: "list_drives".into(), arguments: serde_json::Value::Object(Default::default()) })) }
-        "rm" | "delete" => { let mut sub = rest.splitn(2, ' '); let target = sub.next()?; let path = sub.next()?; Some(Packet::ToolCall(packet::ToolCallPayload { requester: username.to_string(), target: target.to_string(), tool_name: "delete_file".into(), arguments: json!({"path":path}) })) }
-        // ── FTP packet commands (primary — the user wanted "as packets, not tools") ──
+        // ── FTP packet commands ──
         "send" | "upload" => {
             let mut sub = rest.splitn(3, ' ');
             let target = match sub.next() { Some(t) => t, None => { println!("Usage: send <target> <local_path> <remote_path>"); return None; } };
@@ -782,15 +777,13 @@ fn print_help() {
     println!("  sleep <t> <ms>                      Pause a remote agent for N ms");
     println!("  whoami <t>                          Get hostname/user of a remote agent");
     println!("  todos <t> [json_array]              Write TODO.md on a remote agent");
-    println!("  mkdir <t> <path>                    Create directory on a remote agent");
     println!("  http-get <t> <url>                  HTTP GET on a remote agent");
-    println!("  list-drives <t>                     List drives on a remote agent (tool)");
-    println!("  rm <t> <path>                       Delete a file on a remote agent");
-    println!("  Encrypted FTP (file transfer as packets):");
-    println!("  send <t> <local> <remote>           Upload a file to a remote agent (max 10MB)");
-    println!("  recv <t> <remote_path>              Download a file from a remote agent");
-    println!("  rm <t> <path>                       Delete a file on a remote agent (FTP packet)");
-    println!("  mkdir <t> <path>                    Create directory on a remote agent (FTP packet)");
+    println!("  list-drives <t>                     List drives on a remote agent");
+    println!("  FTP (encrypted file transfer as packets — no tool overhead):");
+    println!("  send <t> <local> <remote>           Upload a file (max 10MB)");
+    println!("  recv <t> <remote_path>              Download a file");
+    println!("  rm <t> <path>                       Delete a file");
+    println!("  mkdir <t> <path>                    Create directory");
     println!("  tools-list                          List all binary tool IDs");
     println!("  help                                Show this help");
     println!("  quit                                Leave the swarm");
