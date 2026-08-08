@@ -1,5 +1,6 @@
 use serde_json::Value;
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::io::{Read, Write};
 
 /// Execute a named tool with the given arguments. Returns (success, output).
 pub fn execute_tool(tool_name: &str, args: &Value) -> (bool, String) {
@@ -232,30 +233,53 @@ fn tool_run_command(args: &Value) -> (bool, String) {
     let shell = if cfg!(windows) { "cmd" } else { "sh" };
     let flag = if cfg!(windows) { "/C" } else { "-c" };
 
-    let mut cmd = Command::new(shell);
-    cmd.arg(flag).arg(cmd_str);
-    if let Some(dir) = cwd {
-        cmd.current_dir(dir);
-    }
+    let mut child = match Command::new(shell)
+        .arg(flag)
+        .arg(cmd_str)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .current_dir(cwd.unwrap_or("."))
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(e) => return (false, format!("Failed to spawn command: {}", e)),
+    };
 
-    // Timeout via separate thread
-    let result = std::thread::spawn(move || cmd.output())
-        .join()
-        .map_err(|_| "Command thread panicked".to_string());
-
-    match result {
-        Ok(Ok(output)) => {
-            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-            let success = output.status.success();
-            let mut result = stdout;
-            if !stderr.is_empty() {
-                result.push_str("\n[stderr]\n");
-                result.push_str(&stderr);
+    // Wait with timeout — kill the child if it exceeds the limit
+    let start = std::time::Instant::now();
+    let timeout = std::time::Duration::from_secs(timeout_secs);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let mut stdout = String::new();
+                let mut stderr = String::new();
+                if let Some(mut out) = child.stdout.take() {
+                    let _ = out.read_to_string(&mut stdout);
+                }
+                if let Some(mut err) = child.stderr.take() {
+                    let _ = err.read_to_string(&mut stderr);
+                }
+                let success = status.success();
+                let mut result = stdout;
+                if !stderr.is_empty() {
+                    result.push_str("\n[stderr]\n");
+                    result.push_str(&stderr);
+                }
+                return (success, result);
             }
-            (success, result)
+            Ok(None) => {
+                if start.elapsed() > timeout {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return (false, format!("Command timed out after {}s", timeout_secs));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            Err(e) => {
+                let _ = child.kill();
+                return (false, format!("Command error: {}", e));
+            }
         }
-        _ => (false, format!("Command timed out after {}s", timeout_secs)),
     }
 }
 
@@ -280,19 +304,27 @@ fn tool_env_var(args: &Value) -> (bool, String) {
     match name {
         Some(n) => match std::env::var(n) {
             Ok(val) => (true, val),
-            Err(_) => (true, format!("(not set)")),
+            Err(_) => (true, "(not set)".into()),
         },
         None => {
-            // List all env vars
-            let mut vars: Vec<String> = std::env::vars()
+            // List all, but cap at 200 vars to avoid blowing up output
+            let all: Vec<(String, String)> = std::env::vars().collect();
+            let total = all.len();
+            let max_show = args["max"].as_u64().unwrap_or(200) as usize;
+            let mut vars: Vec<String> = all
+                .iter()
+                .take(max_show)
                 .map(|(k, v)| format!("{}={}", k, v))
                 .collect();
             vars.sort();
-            if vars.is_empty() {
-                (true, "(no env vars)".into())
-            } else {
-                (true, vars.join("\n"))
+            let mut result = vars.join("\n");
+            if total > max_show {
+                result.push_str(&format!(
+                    "\n... [showing {}/{} vars; use 'name' to query a specific one]",
+                    max_show, total
+                ));
             }
+            (true, result)
         }
     }
 }
@@ -329,7 +361,6 @@ fn tool_http_get(args: &Value) -> (bool, String) {
         None => return (false, "Missing 'url' argument".into()),
     };
 
-    // Basic HTTP GET using std::net::TcpStream
     let parsed = match parse_url(url) {
         Ok(p) => p,
         Err(e) => return (false, e),
@@ -346,23 +377,24 @@ fn tool_http_get(args: &Value) -> (bool, String) {
             stream.set_read_timeout(Some(timeout)).ok();
             stream.set_write_timeout(Some(timeout)).ok();
 
-            use std::io::Write;
             let request = format!(
                 "GET {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\nUser-Agent: Swarm/0.1\r\n\r\n",
-                parsed.path,
-                parsed.host
+                parsed.path, parsed.host
             );
             if stream.write_all(request.as_bytes()).is_err() {
                 return (false, "Failed to send HTTP request".into());
             }
 
-            use std::io::Read;
             let mut response = Vec::new();
             if stream.read_to_end(&mut response).is_err() {
                 return (false, "Failed to read HTTP response".into());
             }
 
             let resp_str = String::from_utf8_lossy(&response);
+            // Extract status code from first line
+            let first_line = resp_str.lines().next().unwrap_or("HTTP/1.1 ???");
+            let is_success = first_line.contains("200") || first_line.contains("201") || first_line.contains("204");
+
             let truncated: String = resp_str.chars().take(10_000).collect();
             let mut result = truncated;
             if resp_str.len() > 10_000 {
@@ -371,7 +403,7 @@ fn tool_http_get(args: &Value) -> (bool, String) {
                     resp_str.len() - 10_000
                 ));
             }
-            (true, result)
+            (is_success, result)
         }
         Err(e) => (false, format!("HTTP connection failed: {}", e)),
     }
@@ -421,12 +453,6 @@ fn parse_url(url: &str) -> Result<ParsedUrl, String> {
 
 // ── AI / planning tools ───────────────────────────────────────
 
-/// Write a structured TODO list to a TODO.md file on disk.
-///
-/// Args:
-///   path   — output file path (default: "TODO.md")
-///   todos  — JSON array of {task: "...", completed: bool} objects
-///   title  — optional heading (default: "# TODO")
 fn tool_write_todos(args: &Value) -> (bool, String) {
     let path = args["path"].as_str().unwrap_or("TODO.md");
     let title = args["title"].as_str().unwrap_or("# TODO");
@@ -447,7 +473,6 @@ fn tool_write_todos(args: &Value) -> (bool, String) {
         if completed {
             done_count += 1;
         }
-        // Add optional subtasks
         if let Some(subtasks) = todo["subtasks"].as_array() {
             for sub in subtasks {
                 let sub_task = sub["task"].as_str().unwrap_or("subtask");
@@ -459,7 +484,12 @@ fn tool_write_todos(args: &Value) -> (bool, String) {
     }
 
     lines.push(String::new());
-    lines.push(format!("_{}/{} completed_{}", done_count, total, if done_count == total { " ✅" } else { "" }));
+    lines.push(format!(
+        "_{}/{} completed_{}",
+        done_count,
+        total,
+        if done_count == total { " ✅" } else { "" }
+    ));
 
     let content = lines.join("\n");
 
@@ -472,7 +502,16 @@ fn tool_write_todos(args: &Value) -> (bool, String) {
     match std::fs::write(path, &content) {
         Ok(()) => (
             true,
-            format!("Wrote TODO.md with {}/{} tasks{}", done_count, total, if done_count == total { " (all done!)" } else { "" }),
+            format!(
+                "Wrote TODO.md with {}/{} tasks{}",
+                done_count,
+                total,
+                if done_count == total {
+                    " (all done!)"
+                } else {
+                    ""
+                }
+            ),
         ),
         Err(e) => (false, format!("Failed to write {}: {}", path, e)),
     }

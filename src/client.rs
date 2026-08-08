@@ -614,6 +614,14 @@ fn json_command_to_packet(cmd: &Value, username: &str) -> Result<Option<Packet>,
                 arguments: serde_json::Value::Object(Default::default()),
             })))
         }
+        "rm" | "delete" => {
+            let target = cmd["target"].as_str().ok_or("'target' required")?;
+            let path = cmd["path"].as_str().ok_or("'path' required")?;
+            Ok(Some(Packet::ToolCall(packet::ToolCallPayload {
+                requester: username.to_string(), target: target.to_string(),
+                tool_name: "delete_file".into(), arguments: json!({"path":path}),
+            })))
+        }
         "tools-list" | "tools_list" => {
             let tools: Vec<Value> = binary_tool::list_tools().iter().map(|(id, name, desc)| {
                 json!({"id":format!("0x{:02X}", id),"name":name,"description":desc})
@@ -992,6 +1000,15 @@ fn parse_command(line: &str, username: &str) -> Option<Packet> {
                 tool_name: "list_drives".into(), arguments: serde_json::Value::Object(Default::default()),
             }))
         }
+        "rm" | "delete" => {
+            let mut sub = rest.splitn(2, ' ');
+            let target = sub.next()?;
+            let path = sub.next()?;
+            Some(Packet::ToolCall(packet::ToolCallPayload {
+                requester: username.to_string(), target: target.to_string(),
+                tool_name: "delete_file".into(), arguments: json!({"path":path}),
+            }))
+        }
         "tools-list" | "tools_list" => {
             println!("Binary Tool ID Registry:");
             println!("{:<6} {:<22} {}", "ID", "Name", "Description");
@@ -1065,6 +1082,7 @@ fn print_help() {
     println!("  mkdir <t> <path>                    Create directory on a remote agent");
     println!("  http-get <t> <url>                  HTTP GET on a remote agent");
     println!("  list-drives <t>                     List drives on a remote agent (tool)");
+    println!("  rm <t> <path>                       Delete a file on a remote agent");
     println!("  tools-list                          List all binary tool IDs");
     println!("  help                                Show this help");
     println!("  quit                                Leave the swarm");
