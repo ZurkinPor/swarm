@@ -190,7 +190,12 @@ fn load_key(key_opt: &Option<String>, path: &PathBuf) -> anyhow::Result<Crypto> 
     } else {
         let key = Crypto::generate_key();
         std::fs::write(path, &key)?;
-        println!("[NOTE] Generated new key file: {}", path.display());
+        eprintln!("╔══════════════════════════════════════════════════════════╗");
+        eprintln!("║  WARNING: Generated new key — clients MUST use the      ║");
+        eprintln!("║  SAME key or they will fail with decryption errors.     ║");
+        eprintln!("║  Key file: {}{}║", path.display(), " ".repeat(53_usize.saturating_sub(path.display().to_string().len())));
+        eprintln!("║  Share via: swarm.exe gen-key -K <hex> -o swarm.key    ║");
+        eprintln!("╚══════════════════════════════════════════════════════════╝");
         Crypto::from_key_file(path)
     }
 }

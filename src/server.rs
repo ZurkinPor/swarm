@@ -38,10 +38,9 @@ impl Server {
             let state = self.state.clone();
             let crypto = self.crypto.clone();
             tokio::spawn(async move {
-                if let Err(e) = handle_client(stream, state, crypto).await {
+                if let Err(e) = handle_client(stream, state, crypto, addr).await {
                     eprintln!("[SERVER] Client {} error: {}", addr, e);
                 }
-                println!("[SERVER] Client {} disconnected", addr);
             });
         }
     }
@@ -51,6 +50,7 @@ async fn handle_client(
     stream: TcpStream,
     state: Arc<Mutex<SwarmState>>,
     crypto: Arc<Crypto>,
+    addr: SocketAddr,
 ) -> anyhow::Result<()> {
     let (reader, writer) = stream.into_split();
     let writer = Arc::new(Mutex::new(writer));
@@ -60,6 +60,8 @@ async fn handle_client(
 
     let mut framed = FramedRead::new(reader, FrameCodec);
     let mut username: Option<String> = None;
+    let mut error_count: u32 = 0;
+    let mut authenticated = false;
 
     // Subscribe to broadcast notifications
     let mut notify_rx = {
@@ -98,15 +100,22 @@ async fn handle_client(
         let encrypted_frame = match frame_result {
             Ok(f) => f,
             Err(e) => {
-                eprintln!("[SERVER] Frame error: {}", e);
+                if authenticated {
+                    eprintln!("[SERVER] Frame error from {}: {}", username.as_deref().unwrap_or("?"), e);
+                } else {
+                    error_count += 1;
+                }
                 break;
             }
         };
 
         let decrypted = match crypto.decrypt(&encrypted_frame) {
-            Ok(d) => d,
-            Err(e) => {
-                eprintln!("[SERVER] Decrypt error: {}", e);
+            Ok(d) => {
+                authenticated = true;
+                d
+            }
+            Err(_) => {
+                error_count += 1;
                 continue;
             }
         };
@@ -149,6 +158,14 @@ async fn handle_client(
         if is_leave {
             break;
         }
+    }
+
+    // Log if this was a noisy unauthenticated connection
+    if !authenticated && error_count > 0 {
+        eprintln!(
+            "[SERVER] Rejected {} bad frames from {} (wrong key or non-swarm traffic)",
+            error_count, addr
+        );
     }
 
     // Cleanup
