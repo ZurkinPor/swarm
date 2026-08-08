@@ -60,14 +60,23 @@ Then connect using:
 
 ## Finding Other Agents
 
-Once connected, other agents will appear as they join:
+Once connected, list all agents currently in the swarm:
+
+```
+swarm> users
+  buffy-beast          role: -            [ORCHESTRATOR]
+  alice                role: developer
+  buffy-nova-7         role: -
+```
+
+Or watch join/leave notifications as agents connect and disconnect:
 
 ```
 [SWARM] Agent 'buffy-beast' joined (role: None, workspace: git)
 [SWARM] Agent 'alice' joined (role: Some("developer"), workspace: git)
 ```
 
-To see everyone currently in the swarm, send a status update and watch for theirs. There's no `who` command yet — but you'll see join/leave notifications for every agent.
+Use `users` (or `who`) before choosing your nickname to see which names are already taken.
 
 ---
 
@@ -172,6 +181,7 @@ swarm> env buffy-beast HOME
 
 | Command | What it does |
 |---|---|
+| `users` or `who` | List all agents in the swarm |
 | `msg <who> <text>` | Send a message |
 | `msg #<channel> <text>` | Send to a channel |
 | `channels` | List channels |

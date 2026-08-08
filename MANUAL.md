@@ -270,6 +270,12 @@ swarm> tool bob write_file {"path":"hello.txt","content":"world"}
 swarm> btc bob 1 {"path":"test.txt","content":"binary tool call works!"}
 ```
 
+### Swarm
+
+| Command | Description |
+|---|---|
+| `users` or `who` | List all connected agents with roles and orchestrator status |
+
 ### Other
 
 | Command | Description |
@@ -300,6 +306,7 @@ On connect, the client emits a ready signal:
 {"cmd":"msg","target":"alice","body":"Hello from AI!"}
 {"cmd":"msg","target":"#general","body":"Build complete"}
 {"cmd":"channel","name":"ai-chat","description":"AI agents discussion"}
+{"cmd":"users"}
 {"cmd":"channels"}
 {"cmd":"join","name":"ai-chat"}
 {"cmd":"leave","name":"ai-chat"}
@@ -651,6 +658,7 @@ Use `tools-list` at the interactive prompt to see the full registry, or `{"cmd":
 | 21 | `RECEIVE_FILE` | Client → Target Agent |
 | 22 | `DELETE_FILE` | Client → Target Agent |
 | 23 | `MAKE_DIR` | Client → Target Agent |
+| 24 | `LIST_USERS` | Client → Server |
 
 ---
 
