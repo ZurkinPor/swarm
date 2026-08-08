@@ -396,10 +396,10 @@ fn json_command_to_packet(cmd: &Value, username: &str) -> Result<Option<Packet>,
         "sleep" => { let target = cmd["target"].as_str().ok_or("'target' required")?; let ms = cmd["ms"].as_u64().unwrap_or(1000); Ok(Some(Packet::ToolCall(packet::ToolCallPayload { requester: username.to_string(), target: target.to_string(), tool_name: "sleep".into(), arguments: json!({"ms":ms}) }))) }
         "whoami" => { let target = cmd["target"].as_str().ok_or("'target' required")?; Ok(Some(Packet::ToolCall(packet::ToolCallPayload { requester: username.to_string(), target: target.to_string(), tool_name: "whoami".into(), arguments: serde_json::Value::Object(Default::default()) }))) }
         "todos" => { let target = cmd["target"].as_str().ok_or("'target' required")?; let path = cmd["path"].as_str().unwrap_or("TODO.md"); let title = cmd["title"].as_str().unwrap_or("# TODO"); let todos = cmd.get("todos").cloned().unwrap_or(json!([])); Ok(Some(Packet::ToolCall(packet::ToolCallPayload { requester: username.to_string(), target: target.to_string(), tool_name: "write_todos".into(), arguments: json!({"path":path,"title":title,"todos":todos}) }))) }
-        "mkdir" | "make-dir" => { let target = cmd["target"].as_str().ok_or("'target' required")?; let path = cmd["path"].as_str().ok_or("'path' required")?; Ok(Some(Packet::ToolCall(packet::ToolCallPayload { requester: username.to_string(), target: target.to_string(), tool_name: "create_dir".into(), arguments: json!({"path":path}) }))) }
+        "mkdir" | "make-dir" => { let target = cmd["target"].as_str().ok_or("'target' required")?; let path = cmd["path"].as_str().ok_or("'path' required")?; Ok(Some(Packet::MakeDir(packet::MakeDirPayload { requester: username.to_string(), target: target.to_string(), path: path.to_string() }))) }
         "http-get" => { let target = cmd["target"].as_str().ok_or("'target' required")?; let url = cmd["url"].as_str().ok_or("'url' required")?; let mut args = json!({"url":url}); if let Some(t) = cmd["timeout"].as_u64() { args["timeout"] = json!(t); } Ok(Some(Packet::ToolCall(packet::ToolCallPayload { requester: username.to_string(), target: target.to_string(), tool_name: "http_get".into(), arguments: args }))) }
         "list-drives" => { let target = cmd["target"].as_str().ok_or("'target' required")?; Ok(Some(Packet::ToolCall(packet::ToolCallPayload { requester: username.to_string(), target: target.to_string(), tool_name: "list_drives".into(), arguments: serde_json::Value::Object(Default::default()) }))) }
-        "rm" | "delete" => { let target = cmd["target"].as_str().ok_or("'target' required")?; let path = cmd["path"].as_str().ok_or("'path' required")?; Ok(Some(Packet::ToolCall(packet::ToolCallPayload { requester: username.to_string(), target: target.to_string(), tool_name: "delete_file".into(), arguments: json!({"path":path}) }))) }
+        "rm" | "delete-file" => { let target = cmd["target"].as_str().ok_or("'target' required")?; let path = cmd["path"].as_str().ok_or("'path' required")?; Ok(Some(Packet::DeleteFile(packet::DeleteFilePayload { requester: username.to_string(), target: target.to_string(), path: path.to_string() }))) }
         // ── FTP packet commands ──
         "send" | "upload" => {
             let target = cmd["target"].as_str().ok_or("'target' required")?;
@@ -416,16 +416,7 @@ fn json_command_to_packet(cmd: &Value, username: &str) -> Result<Option<Packet>,
             let max_bytes = cmd["max_bytes"].as_u64();
             Ok(Some(Packet::ReceiveFile(packet::ReceiveFilePayload { requester: username.to_string(), target: target.to_string(), path: path.to_string(), max_bytes })))
         }
-        "rmfile" | "delete-file" => {
-            let target = cmd["target"].as_str().ok_or("'target' required")?;
-            let path = cmd["path"].as_str().ok_or("'path' required")?;
-            Ok(Some(Packet::DeleteFile(packet::DeleteFilePayload { requester: username.to_string(), target: target.to_string(), path: path.to_string() })))
-        }
-        "mkdir-ftp" | "make-dir-ftp" => {
-            let target = cmd["target"].as_str().ok_or("'target' required")?;
-            let path = cmd["path"].as_str().ok_or("'path' required")?;
-            Ok(Some(Packet::MakeDir(packet::MakeDirPayload { requester: username.to_string(), target: target.to_string(), path: path.to_string() })))
-        }
+
         "tools-list" | "tools_list" => { let tools: Vec<Value> = binary_tool::list_tools().iter().map(|(id, name, desc)| json!({"id":format!("0x{:02X}", id),"name":name,"description":desc})).collect(); println!("{}", serde_json::to_string(&json!({"type":"tool_list","tools":tools})).unwrap()); Ok(None) }
         _ => Ok(None),
     }
@@ -624,26 +615,43 @@ fn parse_command(line: &str, username: &str) -> Option<Packet> {
         "sleep" => { let mut sub = rest.splitn(2, ' '); let target = sub.next()?; let ms: u64 = sub.next()?.parse().ok()?; Some(Packet::ToolCall(packet::ToolCallPayload { requester: username.to_string(), target: target.to_string(), tool_name: "sleep".into(), arguments: json!({"ms":ms}) })) }
         "whoami" => { let target = rest.trim(); if target.is_empty() { return None; } Some(Packet::ToolCall(packet::ToolCallPayload { requester: username.to_string(), target: target.to_string(), tool_name: "whoami".into(), arguments: serde_json::Value::Object(Default::default()) })) }
         "todos" => { let mut sub = rest.splitn(2, ' '); let target = sub.next()?; let todo_args = sub.next().unwrap_or("[]"); let todos: Value = serde_json::from_str(todo_args).ok()?; Some(Packet::ToolCall(packet::ToolCallPayload { requester: username.to_string(), target: target.to_string(), tool_name: "write_todos".into(), arguments: json!({"path":"TODO.md","todos":todos}) })) }
-        "mkdir" | "make-dir" => { let mut sub = rest.splitn(2, ' '); let target = sub.next()?; let path = sub.next()?; Some(Packet::ToolCall(packet::ToolCallPayload { requester: username.to_string(), target: target.to_string(), tool_name: "create_dir".into(), arguments: json!({"path":path}) })) }
+        "mkdir" | "make-dir" => {
+            let mut sub = rest.splitn(2, ' '); let target = sub.next()?; let path = sub.next()?;
+            Some(Packet::MakeDir(packet::MakeDirPayload { requester: username.to_string(), target: target.to_string(), path: path.to_string() }))
+        }
         "http-get" => { let mut sub = rest.splitn(2, ' '); let target = sub.next()?; let url = sub.next()?; Some(Packet::ToolCall(packet::ToolCallPayload { requester: username.to_string(), target: target.to_string(), tool_name: "http_get".into(), arguments: json!({"url":url}) })) }
         "list-drives" => { let target = rest.trim(); if target.is_empty() { return None; } Some(Packet::ToolCall(packet::ToolCallPayload { requester: username.to_string(), target: target.to_string(), tool_name: "list_drives".into(), arguments: serde_json::Value::Object(Default::default()) })) }
         "rm" | "delete" => { let mut sub = rest.splitn(2, ' '); let target = sub.next()?; let path = sub.next()?; Some(Packet::ToolCall(packet::ToolCallPayload { requester: username.to_string(), target: target.to_string(), tool_name: "delete_file".into(), arguments: json!({"path":path}) })) }
-        // ── FTP packet commands ──
+        // ── FTP packet commands (primary — the user wanted "as packets, not tools") ──
         "send" | "upload" => {
-            let mut sub = rest.splitn(3, ' '); let target = sub.next()?; let local = sub.next()?; let remote = sub.next()?;
-            let bytes = std::fs::read(local).map_err(|_| "can't read local file").ok()?;
+            let mut sub = rest.splitn(3, ' ');
+            let target = match sub.next() { Some(t) => t, None => { println!("Usage: send <target> <local_path> <remote_path>"); return None; } };
+            let local = match sub.next() { Some(p) => p, None => { println!("Missing local path"); return None; } };
+            let remote = match sub.next() { Some(p) => p, None => { println!("Missing remote path"); return None; } };
+            // Size limit: 10 MB
+            const MAX_SEND: u64 = 10_000_000;
+            match std::fs::metadata(local) {
+                Ok(meta) if meta.len() > MAX_SEND => {
+                    println!("[FTP] File too large: {:.1} MB (max: {} MB)", meta.len() as f64 / 1_000_000.0, MAX_SEND / 1_000_000);
+                    return Some(Packet::Status(packet::StatusPayload { username: username.to_string(), status: packet::AgentStatus::Idle, task_id: None, progress_pct: None, message: None }));
+                }
+                Err(e) => { println!("[FTP] Cannot read '{}': {}", local, e); return Some(Packet::Status(packet::StatusPayload { username: username.to_string(), status: packet::AgentStatus::Idle, task_id: None, progress_pct: None, message: None })); }
+                _ => {}
+            }
+            let bytes = match std::fs::read(local) { Ok(b) => b, Err(e) => { println!("[FTP] Failed to read '{}': {}", local, e); return Some(Packet::Status(packet::StatusPayload { username: username.to_string(), status: packet::AgentStatus::Idle, task_id: None, progress_pct: None, message: None })); } };
             let b64 = base64_encode(&bytes);
+            println!("[FTP] Sending '{}' ({} bytes) → {}:{}", local, bytes.len(), target, remote);
             Some(Packet::SendFile(packet::SendFilePayload { requester: username.to_string(), target: target.to_string(), path: remote.to_string(), content_b64: b64, overwrite: false }))
         }
         "recv" | "download" => {
             let mut sub = rest.splitn(2, ' '); let target = sub.next()?; let path = sub.next()?;
             Some(Packet::ReceiveFile(packet::ReceiveFilePayload { requester: username.to_string(), target: target.to_string(), path: path.to_string(), max_bytes: None }))
         }
-        "rmfile" | "delete-file" => {
+        "rm" | "delete-file" => {
             let mut sub = rest.splitn(2, ' '); let target = sub.next()?; let path = sub.next()?;
             Some(Packet::DeleteFile(packet::DeleteFilePayload { requester: username.to_string(), target: target.to_string(), path: path.to_string() }))
         }
-        "mkdir-ftp" | "make-dir-ftp" => {
+        "mkdir" | "make-dir" => {
             let mut sub = rest.splitn(2, ' '); let target = sub.next()?; let path = sub.next()?;
             Some(Packet::MakeDir(packet::MakeDirPayload { requester: username.to_string(), target: target.to_string(), path: path.to_string() }))
         }
@@ -779,10 +787,10 @@ fn print_help() {
     println!("  list-drives <t>                     List drives on a remote agent (tool)");
     println!("  rm <t> <path>                       Delete a file on a remote agent");
     println!("  Encrypted FTP (file transfer as packets):");
-    println!("  send <t> <local> <remote>           Upload a file to a remote agent");
+    println!("  send <t> <local> <remote>           Upload a file to a remote agent (max 10MB)");
     println!("  recv <t> <remote_path>              Download a file from a remote agent");
-    println!("  rmfile <t> <path>                   Delete a file on a remote agent (packet)");
-    println!("  mkdir-ftp <t> <path>                Create directory on a remote agent (packet)");
+    println!("  rm <t> <path>                       Delete a file on a remote agent (FTP packet)");
+    println!("  mkdir <t> <path>                    Create directory on a remote agent (FTP packet)");
     println!("  tools-list                          List all binary tool IDs");
     println!("  help                                Show this help");
     println!("  quit                                Leave the swarm");
