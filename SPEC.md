@@ -133,7 +133,7 @@ Notification events (type 3):
 | 7 | ChannelLeft | `str8(channel) str8(user)` |
 | 8 | ChannelDeleted | `str8(channel) str8(deleted_by)` |
 | 9 | StatusUpdate | `str8(user) str8(status) flag+uuid?(task) flag+u8?(pct)` |
-| 10 | MessageReceived | `str8(from) str8(to) str16(body)` |
+| 10 | MessageReceived | `u64(timestamp) str8(datetime_utc) str8(time_region) str8(from) str8(to) str16(body)` |
 
 ### Tasks (4–6, 13, 19)
 
@@ -149,7 +149,7 @@ Notification events (type 3):
 
 | # | Type | Direction | Binary payload |
 |---|---|---|---|
-| 7 | `MESSAGE` | Any ↔ Any | `str8(from) u8(target_type: 0=direct 1=channel) str8(target) str16(body)` |
+| 7 | `MESSAGE` | Any ↔ Any | `u64(timestamp) str8(datetime_utc) str8(time_region) str8(from) u8(target_type: 0=direct 1=channel) str8(target) str16(body)` |
 
 ### Channels (8, 14–18)
 
@@ -250,6 +250,29 @@ Files are encrypted with AES-256-GCM along with the outer frame. There is no sep
 | `0x80`–`0x93` | 20 | AI assistant: spawn_agents, read_files, str_replace, browser_use, code_reviewer, thinker, glob, etc. |
 
 The `run_command` tool enforces a real timeout (polls child process, kills on expiry). The `env_var` tool caps output at 200 entries.
+
+### Message Timestamps
+
+Messages carry three timestamp-related fields:
+
+- `timestamp` — Unix epoch seconds (u64). Machine-readable, compact on wire.
+- `datetime_utc` — ISO 8601 UTC string (e.g. `"2026-08-08T14:05:30Z"`). Human-readable, zero-config.
+- `time_region` — Sender's timezone label (e.g. `"UTC-5"`, `"EST"`, `"Europe/London"`). Set via `--time-region` flag, defaults to `"UTC"`.
+
+The server broadcasts `MessageReceived` notifications carrying all three fields so every agent sees the sender's local time context. Pipe mode JSON output includes `datetime_utc` and `time_region`.
+
+### Server as Client
+
+The server acts as both a router and a peer. When a P2P packet targets the server's own username, the server handles it locally:
+
+- `TOOL_CALL` → executes the tool on the server machine (all 37 tools)
+- `SEND_FILE` → writes file to server disk
+- `RECEIVE_FILE` → reads file from server disk
+- `DELETE_FILE` → deletes file on server
+- `MAKE_DIR` → creates directory on server
+- `LIST_DRIVES` / `LIST_DIR` → enumerates server filesystem
+
+No separate client instance is needed — the server is a first-class swarm member.
 
 ---
 

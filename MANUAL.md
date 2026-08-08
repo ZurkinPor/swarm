@@ -76,9 +76,10 @@ Options:
   -K <HEX>                      64-char hex key directly
       --workspace-mode <MODE>   "git" or "single-host" [default: git]
       --orchestrator            Run as task orchestrator
+      --time-region <TZ>        Timezone label [default: UTC]
 ```
 
-The server registers itself as an agent, handles routing, broadcasts notifications, and enforces orchestrator rules.
+The server registers itself as an agent, handles routing, broadcasts notifications, and enforces orchestrator rules. The server also handles P2P operations locally — tool calls and file transfers targeting the server execute on the server machine itself.
 
 ### `connect` — Join a Swarm as a Client
 
@@ -96,6 +97,7 @@ Options:
       --workspace-mode <MODE>   "git" or "single-host" [default: git]
       --project-root <PATH>     Project root for single-host mode
       --orchestrator            Run as task orchestrator
+      --time-region <TZ>        Timezone label [default: UTC]
       --pipe                    JSON stdin/stdout mode for AI harnesses
 ```
 
@@ -148,8 +150,11 @@ Once connected, type at the `swarm>` prompt. Type `help` to see this list.
 **Examples:**
 ```
 swarm> msg alice Hey, how's the login task going?
+  [MSG from alice] [2026-08-08T14:05:30Z UTC] [UTC-5] Hey!
 swarm> msg #general Build failed — can anyone take a look?
 ```
+
+Messages include UTC timestamp and the sender's time region so all agents see when and from what timezone the message was sent.
 
 ### Swarm Channels
 
@@ -352,7 +357,7 @@ On connect, the client emits a ready signal:
 ```
 
 ```json
-{"type":"event","data":{"type":"Message","from":"bob","to":"alice","body":"Hello!"}}
+{"type":"event","data":{"type":"Message","from":"bob","to":"alice","body":"Hello!","timestamp":1786198000,"datetime_utc":"2026-08-08T14:05:30Z","time_region":"UTC-5"}}
 ```
 
 ```json
