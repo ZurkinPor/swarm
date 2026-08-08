@@ -486,27 +486,44 @@ async fn process_packet(
         Packet::ToolCall(payload) => {
             let tool_name = payload.tool_name.clone();
             let requester = payload.requester.clone();
+            let arguments = payload.arguments.clone();
             forward_or_handle_locally(
                 state, crypto, packet, &payload.target, &requester,
-                || ResponsePacket::ToolCallResult {
-                    requester: requester.clone(),
-                    tool_name: tool_name.clone(),
-                    success: false,
-                    output: format!("Tool '{}' not recognized on server.", tool_name),
+                || {
+                    let (success, output) = crate::tools::execute_tool(&tool_name, &arguments);
+                    println!("[SERVER] Local tool '{}' → {}: {}", tool_name, if success { "OK" } else { "FAIL" }, output.chars().take(80).collect::<String>());
+                    ResponsePacket::ToolCallResult {
+                        requester: requester.clone(),
+                        tool_name: tool_name.clone(),
+                        success,
+                        output,
+                    }
                 },
             )
             .await;
         }
 
-        // ── Encrypted FTP packets ──
+        // ── Swarm File Transfer (handled locally on server too) ──
 
         Packet::SendFile(payload) => {
             let requester = payload.requester.clone();
+            let path = payload.path.clone();
+            let content = payload.content.clone();
+            let overwrite = payload.overwrite;
             forward_or_handle_locally(
                 state, crypto, packet, &payload.target, &requester,
-                || ResponsePacket::Error {
-                    requester: requester.clone(),
-                    message: "SEND_FILE not handled on server".into(),
+                || {
+                    match write_file_local(&path, &content, overwrite) {
+                        Ok(bytes) => ResponsePacket::SendFileResult {
+                            requester: requester.clone(),
+                            path: path.clone(),
+                            bytes_written: bytes,
+                        },
+                        Err(e) => ResponsePacket::Error {
+                            requester: requester.clone(),
+                            message: e,
+                        },
+                    }
                 },
             )
             .await;
@@ -514,11 +531,23 @@ async fn process_packet(
 
         Packet::ReceiveFile(payload) => {
             let requester = payload.requester.clone();
+            let path = payload.path.clone();
+            let max_bytes = payload.max_bytes.unwrap_or(10_000_000);
             forward_or_handle_locally(
                 state, crypto, packet, &payload.target, &requester,
-                || ResponsePacket::Error {
-                    requester: requester.clone(),
-                    message: "RECEIVE_FILE not handled on server".into(),
+                || {
+                    match read_file_local(&path, max_bytes) {
+                        Ok((content, size)) => ResponsePacket::ReceiveFileResult {
+                            requester: requester.clone(),
+                            path: path.clone(),
+                            content,
+                            size_bytes: size,
+                        },
+                        Err(e) => ResponsePacket::Error {
+                            requester: requester.clone(),
+                            message: e,
+                        },
+                    }
                 },
             )
             .await;
@@ -526,11 +555,16 @@ async fn process_packet(
 
         Packet::DeleteFile(payload) => {
             let requester = payload.requester.clone();
+            let path = payload.path.clone();
             forward_or_handle_locally(
                 state, crypto, packet, &payload.target, &requester,
-                || ResponsePacket::Error {
-                    requester: requester.clone(),
-                    message: "DELETE_FILE not handled on server".into(),
+                || {
+                    let deleted = std::fs::remove_file(&path).is_ok();
+                    ResponsePacket::DeleteFileResult {
+                        requester: requester.clone(),
+                        path: path.clone(),
+                        deleted,
+                    }
                 },
             )
             .await;
@@ -538,11 +572,16 @@ async fn process_packet(
 
         Packet::MakeDir(payload) => {
             let requester = payload.requester.clone();
+            let path = payload.path.clone();
             forward_or_handle_locally(
                 state, crypto, packet, &payload.target, &requester,
-                || ResponsePacket::Error {
-                    requester: requester.clone(),
-                    message: "MAKE_DIR not handled on server".into(),
+                || {
+                    let created = std::fs::create_dir_all(&path).is_ok();
+                    ResponsePacket::MakeDirResult {
+                        requester: requester.clone(),
+                        path: path.clone(),
+                        created,
+                    }
                 },
             )
             .await;
@@ -635,6 +674,28 @@ async fn send_frame(writer: &mut (impl AsyncWriteExt + Unpin), data: &[u8]) -> s
 }
 
 // ── Local system helpers (used when server handles P2P requests locally) ──
+
+fn write_file_local(path: &str, data: &[u8], overwrite: bool) -> Result<u64, String> {
+    if !overwrite && std::path::Path::new(path).exists() {
+        return Err(format!("File '{}' already exists. Use overwrite=true to replace.", path));
+    }
+    if let Some(parent) = std::path::Path::new(path).parent() {
+        if !parent.as_os_str().is_empty() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+    }
+    std::fs::write(path, data).map_err(|e| format!("Write failed: {}", e))?;
+    Ok(data.len() as u64)
+}
+
+fn read_file_local(path: &str, max_bytes: u64) -> Result<(Vec<u8>, u64), String> {
+    let bytes = std::fs::read(path).map_err(|e| format!("Read failed: {}", e))?;
+    if bytes.len() as u64 > max_bytes {
+        return Err(format!("File too large: {} bytes (max: {})", bytes.len(), max_bytes));
+    }
+    let size = bytes.len() as u64;
+    Ok((bytes, size))
+}
 
 fn list_local_drives() -> Vec<String> {
     if cfg!(windows) {
