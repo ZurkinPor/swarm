@@ -1,4 +1,5 @@
 mod agent;
+mod binary_tool;
 mod channel;
 mod client;
 mod crypto;

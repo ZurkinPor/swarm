@@ -8,6 +8,7 @@ use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 use tokio_util::codec::FramedRead;
 
+use crate::binary_tool;
 use crate::crypto::Crypto;
 use crate::packet::{self, Packet, ResponsePacket};
 use crate::protocol::FrameCodec;
@@ -106,6 +107,35 @@ async fn run_interactive(
                     continue;
                 }
             };
+            // ── Detect binary tool call (magic byte 0x01) ──
+            if crate::binary_tool::is_binary_tool_call(&decrypted) {
+                match crate::binary_tool::decode_binary_tool_call(&decrypted) {
+                    Ok(Some(btc)) => {
+                        if btc.target == username_read {
+                            let tool_name = crate::binary_tool::tool_id_to_name(btc.tool_id);
+                            eprintln!("[BINARY-TOOL] 0x{:02X} ({}) from {} → executing", btc.tool_id, tool_name, btc.requester);
+                            let (success, output) = crate::tools::execute_tool(tool_name, &btc.arguments);
+                            let response = ResponsePacket::ToolCallResult {
+                                requester: btc.requester,
+                                tool_name: tool_name.to_string(),
+                                success,
+                                output,
+                            };
+                            let payload = serde_json::to_vec(&response).unwrap();
+                            if let Ok(encrypted) = crypto_read.encrypt(&payload) {
+                                let mut w = writer_p2p.lock().await;
+                                let len = encrypted.len() as u32;
+                                let _ = w.write_all(&len.to_be_bytes()).await;
+                                let _ = w.write_all(&encrypted).await;
+                                let _ = w.flush().await;
+                            }
+                        }
+                        continue;
+                    }
+                    _ => {}
+                }
+            }
+
             if let Ok(response) = serde_json::from_slice::<ResponsePacket>(&decrypted) {
                 handle_response(&response);
                 continue;
@@ -159,7 +189,7 @@ async fn run_interactive(
             _ => {
                 let packet = parse_command(line, &username_clone);
                 if let Some(p) = packet {
-                    send_packet(&writer_clone, &crypto_cmd, &p).await?;
+                    send_packet_or_binary(&writer_clone, &crypto_cmd, &p).await?;
                 } else {
                     println!("Unknown command. Type 'help' for available commands.");
                 }
@@ -247,6 +277,36 @@ async fn run_pipe_mode(
                 Ok(d) => d,
                 Err(_) => continue,
             };
+            // ── Detect binary tool call (magic byte 0x01) ──
+            if crate::binary_tool::is_binary_tool_call(&decrypted) {
+                match crate::binary_tool::decode_binary_tool_call(&decrypted) {
+                    Ok(Some(btc)) => {
+                        if btc.target == username_read {
+                            let tool_name = crate::binary_tool::tool_id_to_name(btc.tool_id);
+                            let (success, output) = crate::tools::execute_tool(tool_name, &btc.arguments);
+                            let response = ResponsePacket::ToolCallResult {
+                                requester: btc.requester.clone(),
+                                tool_name: tool_name.to_string(),
+                                success,
+                                output,
+                            };
+                            let payload = serde_json::to_vec(&response).unwrap();
+                            if let Ok(encrypted) = crypto_read.encrypt(&payload) {
+                                let mut w = writer_p2p.lock().await;
+                                let len = encrypted.len() as u32;
+                                let _ = w.write_all(&len.to_be_bytes()).await;
+                                let _ = w.write_all(&encrypted).await;
+                                let _ = w.flush().await;
+                            }
+                        }
+                        // Emit as event too
+                        let _ = event_tx.send(json!({"type":"binary_tool_call","data":{"tool_id":format!("0x{:02X}", btc.tool_id),"tool_name":crate::binary_tool::tool_id_to_name(btc.tool_id),"target":btc.target,"requester":btc.requester,"arguments":btc.arguments}}));
+                        continue;
+                    }
+                    _ => {}
+                }
+            }
+
             if let Ok(response) = serde_json::from_slice::<ResponsePacket>(&decrypted) {
                 let json = serde_json::to_value(&response).unwrap();
                 let _ = event_tx.send(json!({"type":"response","data":json}));
@@ -315,7 +375,7 @@ async fn run_pipe_mode(
             _ => {
                 match json_command_to_packet(&cmd, &username) {
                     Ok(Some(packet)) => {
-                        send_packet(&writer, &crypto, &packet).await?;
+                        send_packet_or_binary(&writer, &crypto, &packet).await?;
                     }
                     Ok(None) => {
                         // Unknown command, ignore
@@ -500,6 +560,37 @@ fn json_command_to_packet(cmd: &Value, username: &str) -> Result<Option<Packet>,
                 arguments,
             })))
         }
+        "btc" | "binary-tool" => {
+            let target = cmd["target"].as_str().ok_or("'target' required")?;
+            // Accept decimal or hex (0x prefix) tool ID
+            let tool_id: u8 = if let Some(v) = cmd["tool_id"].as_u64() {
+                v as u8
+            } else if let Some(s) = cmd["tool_id"].as_str() {
+                if let Some(hex) = s.strip_prefix("0x") {
+                    u8::from_str_radix(hex, 16).map_err(|e| e.to_string())?
+                } else {
+                    s.parse().map_err(|e| format!("Invalid tool_id: {}", e))?
+                }
+            } else {
+                return Err("'tool_id' required (numeric byte value, e.g. 1 or 0x80)".into());
+            };
+            let args = cmd.get("args").cloned().unwrap_or(serde_json::Value::Object(Default::default()));
+            let args_json = serde_json::to_string(&args).map_err(|e| e.to_string())?;
+            Ok(Some(Packet::ToolCall(packet::ToolCallPayload {
+                requester: username.to_string(),
+                target: target.to_string(),
+                tool_name: format!("__binary_0x{:02X}__", tool_id),
+                arguments: serde_json::json!({"__binary":true,"tool_id":tool_id,"args_json":args_json}),
+            })))
+        }
+        "tools-list" | "tools_list" => {
+            // Return tool list as a special response — pipe mode caller prints it
+            let tools: Vec<Value> = binary_tool::list_tools().iter().map(|(id, name, desc)| {
+                json!({"id":format!("0x{:02X}", id),"name":name,"description":desc})
+            }).collect();
+            println!("{}", serde_json::to_string(&json!({"type":"tool_list","tools":tools})).unwrap());
+            Ok(None)
+        }
         _ => Ok(None),
     }
 }
@@ -519,6 +610,39 @@ async fn send_packet(
     w.write_all(&encrypted).await?;
     w.flush().await?;
     Ok(())
+}
+
+/// Like send_packet, but if the packet is a ToolCall with a __binary marker,
+/// encodes it using the compact binary wire format instead of JSON.
+async fn send_packet_or_binary(
+    writer: &Mutex<impl AsyncWriteExt + Unpin>,
+    crypto: &Crypto,
+    packet: &Packet,
+) -> anyhow::Result<()> {
+    if let Packet::ToolCall(payload) = packet {
+        if payload.arguments.get("__binary").and_then(|v| v.as_bool()) == Some(true) {
+            let tool_id = payload.arguments["tool_id"].as_u64().unwrap_or(0) as u8;
+            let args_json = payload.arguments["args_json"].as_str().unwrap_or("{}");
+            eprintln!(
+                "[BINARY-SEND] tool 0x{:02X} → {}",
+                tool_id, payload.target
+            );
+            let raw = binary_tool::encode_binary_tool_call(
+                tool_id,
+                &payload.target,
+                &payload.requester,
+                args_json,
+            );
+            let encrypted = crypto.encrypt(&raw)?;
+            let mut w = writer.lock().await;
+            let len = encrypted.len() as u32;
+            w.write_all(&len.to_be_bytes()).await?;
+            w.write_all(&encrypted).await?;
+            w.flush().await?;
+            return Ok(());
+        }
+    }
+    send_packet(writer, crypto, packet).await
 }
 
 fn handle_p2p_request(
@@ -784,6 +908,42 @@ fn parse_command(line: &str, username: &str) -> Option<Packet> {
             let arguments: serde_json::Value = serde_json::from_str(args_str).ok()?;
             Some(Packet::ToolCall(packet::ToolCallPayload { requester: username.to_string(), target: target.to_string(), tool_name: tool_name.to_string(), arguments }))
         }
+        "btc" | "binary-tool" => {
+            // Format: btc <target> <tool_id> <json_args>
+            // tool_id can be decimal (e.g. 1) or hex (e.g. 0x80)
+            let mut sub = rest.splitn(3, ' ');
+            let target = sub.next()?;
+            let id_str = sub.next()?;
+            let args_str = sub.next().unwrap_or("{}");
+            let tool_id: u8 = if let Some(hex) = id_str.strip_prefix("0x") {
+                u8::from_str_radix(hex, 16).ok()?
+            } else {
+                id_str.parse().ok()?
+            };
+            let args: serde_json::Value = serde_json::from_str(args_str).ok()?;
+            let args_json = serde_json::to_string(&args).ok()?;
+            Some(Packet::ToolCall(packet::ToolCallPayload {
+                requester: username.to_string(),
+                target: target.to_string(),
+                tool_name: format!("__binary_0x{:02X}__", tool_id),
+                arguments: serde_json::json!({"__binary":true,"tool_id":tool_id,"args_json":args_json}),
+            }))
+        }
+        "tools-list" | "tools_list" => {
+            println!("Binary Tool ID Registry:");
+            println!("{:<6} {:<22} {}", "ID", "Name", "Description");
+            for (id, name, desc) in binary_tool::list_tools() {
+                println!("0x{:02X}   {:<22} {}", id, name, desc);
+            }
+            // Return a benign status so caller doesn't print "Unknown command"
+            Some(Packet::Status(packet::StatusPayload {
+                username: username.to_string(),
+                status: packet::AgentStatus::Idle,
+                task_id: None,
+                progress_pct: None,
+                message: None,
+            }))
+        }
         _ => None,
     }
 }
@@ -842,6 +1002,8 @@ fn print_help() {
     println!("  ls <target>:<path>                  List directory on a remote agent");
     println!("  http <t> <method> <url>             Send HTTP request via remote agent");
     println!("  tool <t> <name> [args]              Invoke a tool on a remote agent");
+    println!("  btc <t> <id> [args]                 Binary tool call (byte ID)");
+    println!("  tools-list                          List all binary tool IDs");
     println!("  help                                Show this help");
     println!("  quit                                Leave the swarm");
 }

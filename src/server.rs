@@ -133,6 +133,45 @@ async fn handle_client(
             }
         };
 
+        // ── Detect binary tool call (magic byte 0x01) ──
+        if crate::binary_tool::is_binary_tool_call(&decrypted) {
+            match crate::binary_tool::decode_binary_tool_call(&decrypted) {
+                Ok(Some(btc)) => {
+                    let requester = btc.requester.clone();
+                    let target = btc.target.clone();
+                    let tool_name = crate::binary_tool::tool_id_to_name(btc.tool_id);
+                    println!(
+                        "[SERVER] Binary tool call 0x{:02X} ({}) from {} → {}",
+                        btc.tool_id, tool_name, requester, target
+                    );
+                    // Forward to target agent (re-encrypt the raw binary bytes)
+                    let state = state.lock().await;
+                    if let Ok(encrypted) = crypto.encrypt(&decrypted) {
+                        if !state.send_to_agent(&target, encrypted) {
+                            // Target unreachable — respond with error
+                            let response = ResponsePacket::ToolCallResult {
+                                requester: requester.clone(),
+                                tool_name: tool_name.to_string(),
+                                success: false,
+                                output: format!("Target agent '{}' not found", target),
+                            };
+                            if let Ok(payload) = serde_json::to_vec(&response) {
+                                if let Ok(enc) = crypto.encrypt(&payload) {
+                                    let _ = state.send_to_agent(&requester, enc);
+                                }
+                            }
+                        }
+                    }
+                    continue;
+                }
+                Ok(None) => {} // fall through to JSON
+                Err(e) => {
+                    eprintln!("[SERVER] Binary tool call decode error: {}", e);
+                    continue;
+                }
+            }
+        }
+
         // ── Try ResponsePacket first (P2P replies from target agents) ──
         if let Ok(response) = serde_json::from_slice::<ResponsePacket>(&decrypted) {
             let requester = get_requester_from_response(&response);
