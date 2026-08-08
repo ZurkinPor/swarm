@@ -275,7 +275,7 @@ pub enum NotifyPayload {
     ChannelLeft { channel_name: String, username: String },
     ChannelDeleted { channel_name: String, deleted_by: String },
     StatusUpdate { username: String, status: String, task_id: Option<Uuid>, progress_pct: Option<u8> },
-    MessageReceived { from: String, to: String, body: String, timestamp: u64 },
+    MessageReceived { from: String, to: String, body: String, timestamp: u64, datetime_utc: String, time_region: String },
 }
 impl NotifyPayload {
     fn event_id(&self) -> u8 {
@@ -316,7 +316,7 @@ impl NotifyPayload {
                 w.flag(task_id.is_some()); if let Some(tid) = task_id { w.uuid(tid); }
                 w.flag(progress_pct.is_some()); if let Some(pct) = progress_pct { w.u8(*pct); }
             }
-            NotifyPayload::MessageReceived { from, to, body, timestamp } => { w.u64(*timestamp); w.str8(from); w.str8(to); w.str16(body); }
+            NotifyPayload::MessageReceived { from, to, body, timestamp, datetime_utc, time_region } => { w.u64(*timestamp); w.str8(datetime_utc); w.str8(time_region); w.str8(from); w.str8(to); w.str16(body); }
         }
         w.finish()
     }
@@ -333,7 +333,7 @@ impl NotifyPayload {
             7 => Ok(NotifyPayload::ChannelLeft { channel_name: r.str8()?, username: r.str8()? }),
             8 => Ok(NotifyPayload::ChannelDeleted { channel_name: r.str8()?, deleted_by: r.str8()? }),
             9 => { let username = r.str8()?; let status = r.str8()?; let task_id = if r.flag()? { Some(r.uuid()?) } else { None }; let progress_pct = if r.flag()? { Some(r.u8()?) } else { None }; Ok(NotifyPayload::StatusUpdate { username, status, task_id, progress_pct }) }
-            10 => Ok(NotifyPayload::MessageReceived { timestamp: r.u64()?, from: r.str8()?, to: r.str8()?, body: r.str16()? }),
+            10 => Ok(NotifyPayload::MessageReceived { timestamp: r.u64()?, datetime_utc: r.str8()?, time_region: r.str8()?, from: r.str8()?, to: r.str8()?, body: r.str16()? }),
             _ => Err("unknown notify event"),
         }
     }
@@ -382,10 +382,10 @@ impl TaskCompletePayload {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct MessagePayload { pub from: String, pub to: MessageTarget, pub body: String, pub timestamp: u64 }
+pub struct MessagePayload { pub from: String, pub to: MessageTarget, pub body: String, pub timestamp: u64, pub datetime_utc: String, pub time_region: String }
 impl MessagePayload {
-    fn encode(&self) -> Vec<u8> { let mut w = BinWriter::new(); w.u64(self.timestamp); w.str8(&self.from); match &self.to { MessageTarget::Direct { username } => { w.u8(0); w.str8(username); } MessageTarget::Channel { channel } => { w.u8(1); w.str8(channel); } } w.str16(&self.body); w.finish() }
-    fn decode(r: &mut BinReader) -> Result<Self, &'static str> { let timestamp = r.u64()?; let from = r.str8()?; let target_type = r.u8()?; let to = if target_type == 0 { MessageTarget::Direct { username: r.str8()? } } else { MessageTarget::Channel { channel: r.str8()? } }; let body = r.str16()?; Ok(Self { from, to, body, timestamp }) }
+    fn encode(&self) -> Vec<u8> { let mut w = BinWriter::new(); w.u64(self.timestamp); w.str8(&self.datetime_utc); w.str8(&self.time_region); w.str8(&self.from); match &self.to { MessageTarget::Direct { username } => { w.u8(0); w.str8(username); } MessageTarget::Channel { channel } => { w.u8(1); w.str8(channel); } } w.str16(&self.body); w.finish() }
+    fn decode(r: &mut BinReader) -> Result<Self, &'static str> { let timestamp = r.u64()?; let datetime_utc = r.str8()?; let time_region = r.str8()?; let from = r.str8()?; let target_type = r.u8()?; let to = if target_type == 0 { MessageTarget::Direct { username: r.str8()? } } else { MessageTarget::Channel { channel: r.str8()? } }; let body = r.str16()?; Ok(Self { from, to, body, timestamp, datetime_utc, time_region }) }
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -588,9 +588,9 @@ impl Packet {
                 NotifyPayload::ChannelLeft { channel_name, username } => json!({"type":"Notify","event":"ChannelLeft","channel":channel_name,"username":username}),
                 NotifyPayload::ChannelDeleted { channel_name, deleted_by } => json!({"type":"Notify","event":"ChannelDeleted","channel":channel_name,"deleted_by":deleted_by}),
                 NotifyPayload::StatusUpdate { username, status, .. } => json!({"type":"Notify","event":"StatusUpdate","username":username,"status":status}),
-                NotifyPayload::MessageReceived { from, to, body, timestamp } => json!({"type":"Notify","event":"MessageReceived","from":from,"to":to,"body":body,"timestamp":timestamp}),
+                NotifyPayload::MessageReceived { from, to, body, timestamp, datetime_utc, time_region } => json!({"type":"Notify","event":"MessageReceived","from":from,"to":to,"body":body,"timestamp":timestamp,"datetime_utc":datetime_utc,"time_region":time_region}),
             },
-            Packet::Message(p) => { let target = match &p.to { MessageTarget::Direct { username } => username.clone(), MessageTarget::Channel { channel } => format!("#{}", channel) }; json!({"type":"Message","from":p.from,"to":target,"body":p.body,"timestamp":p.timestamp}) }
+            Packet::Message(p) => { let target = match &p.to { MessageTarget::Direct { username } => username.clone(), MessageTarget::Channel { channel } => format!("#{}", channel) }; json!({"type":"Message","from":p.from,"to":target,"body":p.body,"timestamp":p.timestamp,"datetime_utc":p.datetime_utc,"time_region":p.time_region}) }
             Packet::CreateTask(p) => json!({"type":"CreateTask","title":p.title}),
             Packet::TakeTask(p) => json!({"type":"TakeTask","username":p.username,"count":p.task_ids.len()}),
             Packet::Status(p) => json!({"type":"Status","username":p.username}),
@@ -682,6 +682,8 @@ mod tests {
             to: MessageTarget::Direct { username: "bob".into() },
             body,
             timestamp: 0,
+            datetime_utc: String::new(),
+            time_region: String::new(),
         });
         let enc = p.encode();
         assert_eq!(enc[0], 7); // MESSAGE type

@@ -92,6 +92,8 @@ impl SwarmState {
                         to: agent.username.clone(),
                         body: msg.body,
                         timestamp: 0,
+                        datetime_utc: String::new(),
+                        time_region: String::new(),
                     })
                     .ok();
             }
@@ -447,6 +449,8 @@ impl SwarmState {
         to: &crate::packet::MessageTarget,
         body: &str,
         timestamp: u64,
+        datetime_utc: &str,
+        time_region: &str,
     ) -> Vec<String> {
         match to {
             crate::packet::MessageTarget::Direct { username } => {
@@ -457,6 +461,8 @@ impl SwarmState {
                             to: username.clone(),
                             body: body.to_string(),
                             timestamp,
+                            datetime_utc: datetime_utc.to_string(),
+                            time_region: time_region.to_string(),
                         })
                         .ok();
                 } else {
@@ -485,6 +491,8 @@ impl SwarmState {
                                 to: recipient.clone(),
                                 body: body.to_string(),
                                 timestamp,
+                                datetime_utc: datetime_utc.to_string(),
+                                time_region: time_region.to_string(),
                             })
                             .ok();
                     } else {

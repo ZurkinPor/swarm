@@ -24,11 +24,12 @@ pub async fn run_client(
     project_root: Option<String>,
     pipe_mode: bool,
     is_orchestrator: bool,
+    time_region: String,
 ) -> anyhow::Result<()> {
     if pipe_mode {
-        run_pipe_mode(server_addr, crypto, username, role, capabilities, workspace_mode, project_root, is_orchestrator).await
+        run_pipe_mode(server_addr, crypto, username, role, capabilities, workspace_mode, project_root, is_orchestrator, time_region).await
     } else {
-        run_interactive(server_addr, crypto, username, role, capabilities, workspace_mode, project_root, is_orchestrator).await
+        run_interactive(server_addr, crypto, username, role, capabilities, workspace_mode, project_root, is_orchestrator, time_region).await
     }
 }
 
@@ -43,6 +44,7 @@ async fn run_interactive(
     workspace_mode: String,
     project_root: Option<String>,
     is_orchestrator: bool,
+    time_region: String,
 ) -> anyhow::Result<()> {
     println!(
         "[CLIENT] Connecting to swarm at {} as '{}' (role: {:?}, workspace: {}, orchestrator: {})",
@@ -145,7 +147,7 @@ async fn run_interactive(
             "quit" | "exit" => break,
             "help" => print_help(),
             _ => {
-                let packet = parse_command(line, &username_clone);
+                let packet = parse_command(line, &username_clone, &time_region);
                 if let Some(p) = packet {
                     send_packet(&writer_clone, &crypto_cmd, &p).await?;
                 } else {
@@ -174,6 +176,7 @@ async fn run_pipe_mode(
     workspace_mode: String,
     project_root: Option<String>,
     is_orchestrator: bool,
+    time_region: String,
 ) -> anyhow::Result<()> {
     eprintln!("[PIPE] Connecting to {} as '{}'", server_addr, username);
     let stream = TcpStream::connect(server_addr).await?;
@@ -258,7 +261,7 @@ async fn run_pipe_mode(
         let cmd_type = cmd["cmd"].as_str().unwrap_or("");
         match cmd_type {
             "quit" | "exit" => break,
-            _ => match json_command_to_packet(&cmd, &username) {
+            _ => match json_command_to_packet(&cmd, &username, &time_region) {
                 Ok(Some(packet)) => send_packet(&writer, &crypto, &packet).await?,
                 Ok(None) => {},
                 Err(e) => println!("{}", serde_json::to_string(&json!({"type":"error","message":e})).unwrap()),
@@ -276,14 +279,14 @@ async fn run_pipe_mode(
 }
 
 /// Convert a JSON pipe command into a Packet.
-fn json_command_to_packet(cmd: &Value, username: &str) -> Result<Option<Packet>, String> {
+fn json_command_to_packet(cmd: &Value, username: &str, time_region: &str) -> Result<Option<Packet>, String> {
     let cmd_type = cmd["cmd"].as_str().unwrap_or("");
     match cmd_type {
         "msg" | "message" => {
             let target = cmd["target"].as_str().ok_or("'target' required")?;
             let body = cmd["body"].as_str().unwrap_or("");
             let to = if let Some(channel) = target.strip_prefix('#') { packet::MessageTarget::Channel { channel: channel.to_string() } } else { packet::MessageTarget::Direct { username: target.to_string() } };
-            Ok(Some(Packet::Message(packet::MessagePayload { from: username.to_string(), to, body: body.to_string(), timestamp: now_secs() })))
+            let (ts, dt) = now_utc(); Ok(Some(Packet::Message(packet::MessagePayload { from: username.to_string(), to, body: body.to_string(), timestamp: ts, datetime_utc: dt, time_region: time_region.to_string() })))
         }
         "task" => {
             let title = cmd["title"].as_str().ok_or("'title' required")?;
@@ -495,14 +498,14 @@ fn handle_incoming_packet(packet: &Packet, our_username: &str) {
                 let extra = if let (Some(tid), Some(pct)) = (task_id, progress_pct) { format!(" on task {} ({}%)", tid, pct) } else { String::new() };
                 println!("[SWARM] Agent '{}' is {}{}", username, status, extra);
             }
-            packet::NotifyPayload::MessageReceived { from, to, body, timestamp } => if to == our_username { let ts = format_time(*timestamp); println!("[MSG from {}] [{}] {}", from, ts, body); }
+            packet::NotifyPayload::MessageReceived { from, to, body, timestamp: _, datetime_utc, time_region } => if to == our_username { println!("[MSG from {}] [{} UTC] [{}] {}", from, datetime_utc, time_region, body); }
         },
-        Packet::Message(msg) => { let ts = format_time(msg.timestamp); println!("[MSG] {} [{}]: {}", msg.from, ts, msg.body); }
+        Packet::Message(msg) => println!("[MSG] {} [{} UTC] [{}]: {}", msg.from, msg.datetime_utc, msg.time_region, msg.body),
         _ => {}
     }
 }
 
-fn parse_command(line: &str, username: &str) -> Option<Packet> {
+fn parse_command(line: &str, username: &str, time_region: &str) -> Option<Packet> {
     let parts: Vec<&str> = line.splitn(2, ' ').collect();
     let cmd = parts[0];
     let rest = if parts.len() > 1 { parts[1] } else { "" };
@@ -513,7 +516,7 @@ fn parse_command(line: &str, username: &str) -> Option<Packet> {
             let target = sub.next()?;
             let body = sub.next().unwrap_or("");
             let to = if let Some(channel) = target.strip_prefix('#') { packet::MessageTarget::Channel { channel: channel.to_string() } } else { packet::MessageTarget::Direct { username: target.to_string() } };
-            Some(Packet::Message(packet::MessagePayload { from: username.to_string(), to, body: body.to_string(), timestamp: now_secs() }))
+            let (ts, dt) = now_utc(); Some(Packet::Message(packet::MessagePayload { from: username.to_string(), to, body: body.to_string(), timestamp: ts, datetime_utc: dt, time_region: time_region.to_string() }))
         }
         "task" => {
             let mut role = None; let mut title = rest.to_string();
@@ -654,14 +657,37 @@ fn list_local_dir(path: &str, recursive: bool) -> anyhow::Result<Vec<packet::Dir
     Ok(result)
 }
 
-fn now_secs() -> u64 { std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs() }
-
-fn format_time(ts: u64) -> String {
+fn now_utc() -> (u64, String) {
+    let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
     let secs = ts % 60;
     let mins = (ts / 60) % 60;
     let hours = (ts / 3600) % 24;
-    format!("{:02}:{:02}:{:02}", hours, mins, secs)
+    // Convert Unix epoch → YYYY-MM-DDTHH:MM:SSZ
+    let (y, m, d) = epoch_to_date(ts);
+    let dt = format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z", y, m, d, hours, mins, secs);
+    (ts, dt)
 }
+
+fn epoch_to_date(ts: u64) -> (u32, u32, u32) {
+    let mut days = (ts / 86400) as u32;
+    let mut y = 1970u32;
+    loop {
+        let dy = if is_leap(y) { 366 } else { 365 };
+        if days < dy { break; }
+        days -= dy;
+        y += 1;
+    }
+    let months = if is_leap(y) { [31,29,31,30,31,30,31,31,30,31,30,31] } else { [31,28,31,30,31,30,31,31,30,31,30,31] };
+    let mut m = 1u32;
+    for &mlen in &months {
+        if days < mlen { break; }
+        days -= mlen;
+        m += 1;
+    }
+    (y, m, days + 1)
+}
+
+fn is_leap(y: u32) -> bool { (y % 4 == 0 && y % 100 != 0) || y % 400 == 0 }
 
 fn print_help() {
     println!("Swarm Client Commands:");

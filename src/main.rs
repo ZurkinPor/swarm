@@ -59,6 +59,10 @@ enum Commands {
         /// Run as orchestrator — can assign tasks to other agents
         #[arg(long)]
         orchestrator: bool,
+
+        /// Timezone region (e.g. "UTC-5", "EST", "Europe/London")
+        #[arg(long, default_value = "UTC")]
+        time_region: String,
     },
     /// Connect to a swarm server as a client agent
     Connect {
@@ -97,6 +101,10 @@ enum Commands {
         /// Run as orchestrator — can assign tasks to other agents
         #[arg(long)]
         orchestrator: bool,
+
+        /// Timezone region (e.g. "UTC-5", "EST", "Europe/London")
+        #[arg(long, default_value = "UTC")]
+        time_region: String,
     },
     /// Generate a new random key file
     GenKey {
@@ -124,7 +132,7 @@ async fn main() -> anyhow::Result<()> {
             println!("Key written to {}", output.display());
             println!("Share this key with all swarm members.");
         }
-        Commands::Serve { username, role, workspace_mode, orchestrator } => {
+        Commands::Serve { username, role, workspace_mode, orchestrator, time_region: _ } => {
             let crypto = load_key(&cli.key, &cli.key_file)?;
             let crypto = Arc::new(crypto);
 
@@ -170,6 +178,7 @@ async fn main() -> anyhow::Result<()> {
             project_root,
             pipe,
             orchestrator,
+            time_region,
         } => {
             let crypto = load_key(&cli.key, &cli.key_file)?;
             let crypto = Arc::new(crypto);
@@ -197,6 +206,7 @@ async fn main() -> anyhow::Result<()> {
                 project_root,
                 pipe,
                 orchestrator,
+                time_region,
             )
             .await?;
         }
