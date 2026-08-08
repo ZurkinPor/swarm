@@ -699,6 +699,30 @@ Use `tools-list` at the interactive prompt to see the full registry, or `{"cmd":
 | 25 | `SYNC_SCAN` | Client → Target |
 | 26 | `SYNC_MANIFEST` | Target → Client |
 | 27 | `SYNC_DONE` | Client → Server |
+| 28 | `PROJECT_SELECT` | Client → Server |
+
+---
+
+## Dynamic Project Selection
+
+Change your project scope mid-session without reconnecting:
+
+| Command | Description |
+|---|---|
+| `projects` or `list-projects` | List all known project names |
+| `pick-project <name>` | Scope to a specific project |
+| `leave-project` or `all-projects` | Clear filter — see all projects |
+
+**Rules:**
+- No orchestrator → free to pick/switch/leave
+- Orchestrator present → only orchestrator can pick; others must request (server notifies orchestrator)
+
+Pipe mode:
+```json
+{"cmd":"projects"}
+{"cmd":"pick-project","project":"myproject"}
+{"cmd":"leave-project"}
+```
 
 ---
 

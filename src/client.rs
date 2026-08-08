@@ -90,7 +90,11 @@ async fn run_interactive(
     let username_clone = username.clone();
     let username_read = username.clone();
     let project_clone = project.clone();
-    let project_read = project.clone(); // For read_handle closure
+    let _project_read = project.clone();
+    // Shared mutable project state for dynamic project switching
+    let current_project: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(project.clone()));
+    let current_project_read = current_project.clone();
+    let current_project_cmd = current_project.clone();
 
     // Heartbeat task
     let heartbeat_writer = writer.clone();
@@ -132,7 +136,8 @@ async fn run_interactive(
                     }
                     continue;
                 }
-                handle_incoming_packet(&packet, &username_read, &project_read);
+                let proj = current_project_read.lock().await.clone();
+                handle_incoming_packet(&packet, &username_read, &proj);
                 continue;
             }
             // Then try JSON ResponsePacket (P2P replies)
@@ -162,6 +167,24 @@ async fn run_interactive(
         match line {
             "quit" | "exit" => break,
             "help" => print_help(),
+            cmd if cmd == "pick-project" || cmd.starts_with("pick-project ") || cmd.starts_with("select-project ") => {
+                let packet = parse_command(line, &username_clone, &time_region, &project_clone);
+                if let Some(p) = packet {
+                    // Update local project state immediately
+                    if let Packet::ProjectSelect(ref payload) = p {
+                        let new_proj = if payload.project.is_empty() { None } else { Some(payload.project.clone()) };
+                        *current_project_cmd.lock().await = new_proj;
+                    }
+                    send_packet(&writer_clone, &crypto_cmd, &p).await?;
+                }
+            }
+            "leave-project" | "all-projects" => {
+                let packet = parse_command(line, &username_clone, &time_region, &project_clone);
+                if let Some(p) = packet {
+                    *current_project_cmd.lock().await = None;
+                    send_packet(&writer_clone, &crypto_cmd, &p).await?;
+                }
+            }
             _ => {
                 let packet = parse_command(line, &username_clone, &time_region, &project_clone);
                 if let Some(p) = packet {
@@ -341,6 +364,14 @@ fn json_command_to_packet(cmd: &Value, username: &str, time_region: &str, projec
         }
         "channels" => Ok(Some(Packet::ListChannels(packet::ListChannelsPayload { requester: username.to_string() }))),
         "users" | "who" => Ok(Some(Packet::ListUsers(packet::ListUsersPayload { requester: username.to_string() }))),
+        "projects" | "list-projects" => Ok(Some(Packet::ProjectSelect(packet::ProjectSelectPayload { username: username.to_string(), project: "?".to_string() }))),
+        "pick-project" | "select-project" => {
+            let name = cmd["project"].as_str().ok_or("'project' required")?;
+            Ok(Some(Packet::ProjectSelect(packet::ProjectSelectPayload { username: username.to_string(), project: name.to_string() })))
+        }
+        "leave-project" | "all-projects" => {
+            Ok(Some(Packet::ProjectSelect(packet::ProjectSelectPayload { username: username.to_string(), project: String::new() })))
+        }
         "join" => { let name = cmd["name"].as_str().ok_or("'name' required")?; Ok(Some(Packet::JoinChannel(packet::JoinChannelPayload { channel_name: name.to_string(), username: username.to_string() }))) }
         "leave" => { let name = cmd["name"].as_str().ok_or("'name' required")?; Ok(Some(Packet::LeaveChannel(packet::LeaveChannelPayload { channel_name: name.to_string(), username: username.to_string() }))) }
         "delete-channel" => { let name = cmd["name"].as_str().ok_or("'name' required")?; Ok(Some(Packet::DeleteChannel(packet::DeleteChannelPayload { channel_name: name.to_string(), requested_by: username.to_string() }))) }
@@ -480,6 +511,14 @@ fn handle_response(resp: &ResponsePacket) {
         }
         ResponsePacket::DeleteFileResult { path, deleted, .. } => println!("[SWARM] Delete '{}': {}", path, if *deleted { "OK" } else { "FAILED (not found?)" }),
         ResponsePacket::MakeDirResult { path, created, .. } => println!("[SWARM] Mkdir '{}': {}", path, if *created { "OK" } else { "FAILED" }),
+        ResponsePacket::ProjectListResult { projects, .. } => {
+            if projects.is_empty() {
+                println!("[PROJECTS] No projects registered yet. Use -p <name> when connecting or have agents join with a project.");
+            } else {
+                println!("[PROJECTS] {} project(s):", projects.len());
+                for p in projects { println!("  {}", p); }
+            }
+        }
         ResponsePacket::UserListResult { agents, .. } => {
             if agents.is_empty() {
                 println!("[SWARM] No other agents connected.");
@@ -528,6 +567,12 @@ fn handle_incoming_packet(packet: &Packet, our_username: &str, our_project: &Opt
                 if !project_matches(our_project, project) { return; }
                 if to == our_username { println!("[MSG from {}] [{} UTC] [{}] {}", from, datetime_utc, time_region, body); }
             }
+            packet::NotifyPayload::ProjectChanged { username, project } => {
+                println!("[SWARM] Agent '{}' changed project to: {}", username, project.as_deref().unwrap_or("all"));
+            }
+            packet::NotifyPayload::ProjectRequested { username, .. } => {
+                println!("[SWARM] Agent '{}' is requesting project assignment from orchestrator", username);
+            }
         },
         Packet::Message(msg) => {
             if !project_matches(our_project, &msg.project) { return; }
@@ -574,6 +619,16 @@ fn parse_command(line: &str, username: &str, time_region: &str, project: &Option
         }
         "channels" | "list-channels" => Some(Packet::ListChannels(packet::ListChannelsPayload { requester: username.to_string() })),
         "users" | "who" => Some(Packet::ListUsers(packet::ListUsersPayload { requester: username.to_string() })),
+        "projects" | "list-projects" => Some(Packet::ProjectSelect(packet::ProjectSelectPayload { username: username.to_string(), project: "?".to_string() })),
+        "pick-project" | "select-project" => {
+            let name = rest.trim(); if name.is_empty() { return None; }
+            println!("[PROJECT] Selecting project '{}'...", name);
+            Some(Packet::ProjectSelect(packet::ProjectSelectPayload { username: username.to_string(), project: name.to_string() }))
+        }
+        "leave-project" | "all-projects" => {
+            println!("[PROJECT] Clearing project filter — seeing all projects.");
+            Some(Packet::ProjectSelect(packet::ProjectSelectPayload { username: username.to_string(), project: String::new() }))
+        }
         "join" => { let name = rest.trim(); if name.is_empty() { return None; } Some(Packet::JoinChannel(packet::JoinChannelPayload { channel_name: name.to_string(), username: username.to_string() })) }
         "leave" => { let name = rest.trim(); if name.is_empty() { return None; } Some(Packet::LeaveChannel(packet::LeaveChannelPayload { channel_name: name.to_string(), username: username.to_string() })) }
         "delete-channel" => { let name = rest.trim(); if name.is_empty() { return None; } Some(Packet::DeleteChannel(packet::DeleteChannelPayload { channel_name: name.to_string(), requested_by: username.to_string() })) }
@@ -725,6 +780,10 @@ fn print_help() {
     println!("Swarm Client Commands:");
     println!("  Swarm:");
     println!("  users | who                         List all agents in the swarm");
+    println!("  projects | list-projects            List all known projects");
+    println!("  pick-project <name>                Scope to a specific project");
+    println!("  leave-project                      Clear project filter (see all)");
+    println!("  sync <t> <project>                 Sync project dir with target");
     println!("  Swarm Channels:");
     println!("  channel <name> [desc] [--private]  Create a channel");
     println!("  channels                            List visible channels");

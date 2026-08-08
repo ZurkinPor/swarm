@@ -109,7 +109,7 @@ Payloads larger than 256 bytes are automatically compressed with zstd level 11 b
 
 ## Packet Types
 
-27 packet types, each identified by a u8 type ID on the wire.
+28 packet types, each identified by a u8 type ID on the wire.
 
 ### Connection (1–3)
 
@@ -188,6 +188,12 @@ Notification events (type 3):
 | 25 | `SYNC_SCAN` | Client → Target | `str8(requester) str8(target) str16(project) u8(strategy: 0=newest 1=newest-server 2=interactive)` |
 | 26 | `SYNC_MANIFEST` | Target → Client | `str8(requester) str8(target) u32(file_count) [(str16(path) u64(size) [u8;20](sha1) u64(mtime_secs))...]` |
 | 27 | `SYNC_DONE` | Client → Server | `str8(requester) str8(target) u32(synced) u32(skipped) u32(conflicts)` |
+
+### Project management (28)
+
+| # | Type | Direction | Binary payload |
+|---|---|---|---|
+| 28 | `PROJECT_SELECT` | Client → Server | `str8(username) str16(project)` — project="?" lists, ""=all, "name"=select |
 
 ### Enums
 
@@ -311,6 +317,34 @@ No separate client instance is needed — the server is a first-class swarm memb
 ---
 
 ---
+
+## Dynamic Project Selection
+
+Agents can change their project scope mid-session without reconnecting, subject to orchestrator enforcement:
+
+| Command | Description |
+|---|---|
+| `projects` / `list-projects` | List all known project names in the swarm |
+| `pick-project <name>` | Scope to a specific project (if no orchestrator) |
+| `leave-project` / `all-projects` | Clear the project filter — see all projects |
+
+### Orchestrator Rules
+
+| Scenario | Agent can pick its own project? |
+|---|---|
+| No orchestrator in swarm | ✅ Free to pick/switch/leave |
+| Orchestrator present, agent is orchestrator | ✅ Free to pick/switch/leave |
+| Orchestrator present, agent is NOT orchestrator | ❌ Must request — orchestrator assigns via `PROJECT_SELECT` |
+
+When an orchestrator is present and a non-orchestrator agent tries to pick a project, the server broadcasts a `ProjectRequested` notification to all orchestrators. The orchestrator then assigns a project by sending `PROJECT_SELECT` targeting that agent. The agent's project filter updates dynamically without reconnecting.
+
+### Pipe Mode
+
+```json
+{"cmd":"projects"}
+{"cmd":"pick-project","project":"myproject"}
+{"cmd":"leave-project"}
+```
 
 ## Project Isolation (`-p` / `--project`)
 

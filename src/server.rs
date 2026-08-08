@@ -590,7 +590,39 @@ async fn process_packet(
 
         Packet::SyncScan(_) | Packet::SyncManifest(_) | Packet::SyncDone(_) => {
             // Sync packets are P2P — forward to target
-            // (handled generically by forward_or_handle_locally or P2P handler on client)
+        }
+
+        Packet::ProjectSelect(payload) => {
+            let requester = payload.username.clone();
+            let project = payload.project.clone();
+            let mut state = state.lock().await;
+            if project == "?" {
+                // Query: list all known projects
+                let projects = state.list_projects();
+                send_response_to(crypto, tx, &ResponsePacket::ProjectListResult {
+                    requester: requester.clone(),
+                    projects,
+                });
+            } else {
+                // Select/change project
+                match state.select_project(&requester, &project) {
+                    Ok(proj_opt) => {
+                        let display = proj_opt.as_deref().unwrap_or("all");
+                        send_response_to(crypto, tx, &ResponsePacket::ToolCallResult {
+                            requester: requester.clone(),
+                            tool_name: "project-select".into(),
+                            success: true,
+                            output: format!("Project scope set to: {}", display),
+                        });
+                    }
+                    Err(e) => {
+                        send_response_to(crypto, tx, &ResponsePacket::Error {
+                            requester: requester.clone(),
+                            message: e,
+                        });
+                    }
+                }
+            }
         }
 
         Packet::ListUsers(payload) => {
@@ -661,6 +693,7 @@ fn get_requester_from_response(resp: &ResponsePacket) -> String {
         | ResponsePacket::MakeDirResult { requester, .. }
         | ResponsePacket::Error { requester, .. } => requester.clone(),
         ResponsePacket::UserListResult { requester, .. } => requester.clone(),
+        ResponsePacket::ProjectListResult { requester, .. } => requester.clone(),
     }
 }
 

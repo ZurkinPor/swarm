@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 use tokio::sync::broadcast;
 use tokio::sync::mpsc;
@@ -43,6 +43,8 @@ pub struct SwarmState {
     /// Seconds to wait after task creation before anyone can take it
     /// (lets all agents see the notification first).
     pub task_grace_secs: u64,
+    /// All known project names collected from agent JOINs.
+    pub known_projects: HashSet<String>,
 }
 
 impl SwarmState {
@@ -58,6 +60,7 @@ impl SwarmState {
             mailbox: HashMap::new(),
             task_creation_times: HashMap::new(),
             task_grace_secs: 2,
+            known_projects: HashSet::new(),
         }
     }
 
@@ -101,6 +104,10 @@ impl SwarmState {
             }
         }
         self.connections.insert(agent.username.clone(), conn);
+        // Track project
+        if let Some(ref proj) = agent.project {
+            self.known_projects.insert(proj.clone());
+        }
         self.agents.insert(agent.username.clone(), agent);
     }
 
@@ -551,5 +558,63 @@ impl SwarmState {
 
     pub fn subscribe_notifications(&self) -> broadcast::Receiver<NotifyPayload> {
         self.broadcast_tx.subscribe()
+    }
+
+    // ── Project management ──
+
+    /// List all known project names.
+    pub fn list_projects(&self) -> Vec<String> {
+        let mut projects: Vec<String> = self.known_projects.iter().cloned().collect();
+        projects.sort();
+        projects
+    }
+
+    /// Select/change an agent's project scope.
+    /// If an orchestrator is present and the requester is not an orchestrator,
+    /// the request is denied and a ProjectRequested notification is broadcast.
+    /// Returns Ok(new_project) on success, Err(message) on failure.
+    pub fn select_project(&mut self, username: &str, project: &str) -> Result<Option<String>, String> {
+        let project_opt: Option<String> = if project.is_empty() || project == "*" {
+            None
+        } else {
+            Some(project.to_string())
+        };
+
+        // Orchestrator enforcement
+        if self.has_orchestrator() {
+            let is_orch = self.agents.get(username).map(|a| a.is_orchestrator).unwrap_or(false);
+            if !is_orch {
+                // Notify orchestrators that this agent needs a project
+                self.broadcast_tx
+                    .send(NotifyPayload::ProjectRequested {
+                        username: username.to_string(),
+                        requested_project: project_opt.clone(),
+                    })
+                    .ok();
+                return Err(format!(
+                    "An orchestrator is present — your project request has been sent. Wait for the orchestrator to assign you a project."
+                ));
+            }
+        }
+
+        // Register the project if it's new
+        if let Some(ref proj) = project_opt {
+            self.known_projects.insert(proj.clone());
+        }
+
+        // Update the agent's project
+        if let Some(agent) = self.agents.get_mut(username) {
+            agent.project = project_opt.clone();
+        }
+
+        // Broadcast the change
+        self.broadcast_tx
+            .send(NotifyPayload::ProjectChanged {
+                username: username.to_string(),
+                project: project_opt.clone(),
+            })
+            .ok();
+
+        Ok(project_opt)
     }
 }

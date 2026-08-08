@@ -91,6 +91,7 @@ impl Packet {
             Packet::SyncScan(_) => 25,
             Packet::SyncManifest(_) => 26,
             Packet::SyncDone(_) => 27,
+            Packet::ProjectSelect(_) => 28,
         }
     }
 
@@ -123,6 +124,7 @@ impl Packet {
             25 => Ok(Packet::SyncScan(SyncScanPayload::decode(r)?)),
             26 => Ok(Packet::SyncManifest(SyncManifestPayload::decode(r)?)),
             27 => Ok(Packet::SyncDone(SyncDonePayload::decode(r)?)),
+            28 => Ok(Packet::ProjectSelect(ProjectSelectPayload::decode(r)?)),
             _ => Err("unknown packet type"),
         }
     }
@@ -214,6 +216,7 @@ impl Packet {
             Packet::SyncScan(p) => p.encode(),
             Packet::SyncManifest(p) => p.encode(),
             Packet::SyncDone(p) => p.encode(),
+            Packet::ProjectSelect(p) => p.encode(),
         }
     }
 }
@@ -249,6 +252,7 @@ pub enum Packet {
     SyncScan(SyncScanPayload),
     SyncManifest(SyncManifestPayload),
     SyncDone(SyncDonePayload),
+    ProjectSelect(ProjectSelectPayload),
 }
 
 // ── Payload structs with encode/decode ───────────────────────
@@ -289,6 +293,8 @@ pub enum NotifyPayload {
     ChannelDeleted { channel_name: String, deleted_by: String },
     StatusUpdate { username: String, status: String, task_id: Option<Uuid>, progress_pct: Option<u8> },
     MessageReceived { from: String, to: String, body: String, timestamp: u64, datetime_utc: String, time_region: String, project: Option<String> },
+    ProjectChanged { username: String, project: Option<String> },
+    ProjectRequested { username: String, requested_project: Option<String> },
 }
 impl NotifyPayload {
     fn event_id(&self) -> u8 {
@@ -304,6 +310,8 @@ impl NotifyPayload {
             NotifyPayload::ChannelDeleted { .. } => 8,
             NotifyPayload::StatusUpdate { .. } => 9,
             NotifyPayload::MessageReceived { .. } => 10,
+            NotifyPayload::ProjectChanged { .. } => 11,
+            NotifyPayload::ProjectRequested { .. } => 12,
         }
     }
     fn encode(&self) -> Vec<u8> {
@@ -330,6 +338,8 @@ impl NotifyPayload {
                 w.flag(progress_pct.is_some()); if let Some(pct) = progress_pct { w.u8(*pct); }
             }
             NotifyPayload::MessageReceived { from, to, body, timestamp, datetime_utc, time_region, project } => { w.u64(*timestamp); w.str8(datetime_utc); w.str8(time_region); w.str8(from); w.str8(to); w.str16(body); w.opt_str16(project); }
+            NotifyPayload::ProjectChanged { username, project } => { w.str8(username); w.opt_str16(project); }
+            NotifyPayload::ProjectRequested { username, requested_project } => { w.str8(username); w.opt_str16(requested_project); }
         }
         w.finish()
     }
@@ -347,6 +357,8 @@ impl NotifyPayload {
             8 => Ok(NotifyPayload::ChannelDeleted { channel_name: r.str8()?, deleted_by: r.str8()? }),
             9 => { let username = r.str8()?; let status = r.str8()?; let task_id = if r.flag()? { Some(r.uuid()?) } else { None }; let progress_pct = if r.flag()? { Some(r.u8()?) } else { None }; Ok(NotifyPayload::StatusUpdate { username, status, task_id, progress_pct }) }
             10 => Ok(NotifyPayload::MessageReceived { timestamp: r.u64()?, datetime_utc: r.str8()?, time_region: r.str8()?, from: r.str8()?, to: r.str8()?, body: r.str16()?, project: r.opt_str16()? }),
+            11 => Ok(NotifyPayload::ProjectChanged { username: r.str8()?, project: r.opt_str16()? }),
+            12 => Ok(NotifyPayload::ProjectRequested { username: r.str8()?, requested_project: r.opt_str16()? }),
             _ => Err("unknown notify event"),
         }
     }
@@ -533,6 +545,29 @@ impl ListUsersPayload {
     fn decode(r: &mut BinReader) -> Result<Self, &'static str> { Ok(Self { requester: r.str8()? }) }
 }
 
+// ── Project selection (#28) ────────────────────────────────
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProjectSelectPayload {
+    pub username: String,
+    /// Empty string or "*" means "all projects" (clear filter)
+    pub project: String,
+}
+impl ProjectSelectPayload {
+    fn encode(&self) -> Vec<u8> {
+        let mut w = BinWriter::new();
+        w.str8(&self.username);
+        w.str16(&self.project);
+        w.finish()
+    }
+    fn decode(r: &mut BinReader) -> Result<Self, &'static str> {
+        Ok(Self {
+            username: r.str8()?,
+            project: r.str16()?,
+        })
+    }
+}
+
 // ── Sync payloads (#25–#27) ──────────────────────────────────
 
 /// SHA-1 hash of file content (20 bytes).
@@ -677,6 +712,7 @@ pub enum ResponsePacket {
     DeleteFileResult { requester: String, path: String, deleted: bool },
     MakeDirResult { requester: String, path: String, created: bool },
     UserListResult { requester: String, agents: Vec<UserInfo> },
+    ProjectListResult { requester: String, projects: Vec<String> },
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
@@ -711,6 +747,7 @@ impl Packet {
             Packet::SyncScan(_) => "SYNC_SCAN",
             Packet::SyncManifest(_) => "SYNC_MANIFEST",
             Packet::SyncDone(_) => "SYNC_DONE",
+            Packet::ProjectSelect(_) => "PROJECT_SELECT",
         }
     }
 
@@ -733,6 +770,8 @@ impl Packet {
                 NotifyPayload::ChannelDeleted { channel_name, deleted_by } => json!({"type":"Notify","event":"ChannelDeleted","channel":channel_name,"deleted_by":deleted_by}),
                 NotifyPayload::StatusUpdate { username, status, .. } => json!({"type":"Notify","event":"StatusUpdate","username":username,"status":status}),
                 NotifyPayload::MessageReceived { from, to, body, timestamp, datetime_utc, time_region, .. } => json!({"type":"Notify","event":"MessageReceived","from":from,"to":to,"body":body,"timestamp":timestamp,"datetime_utc":datetime_utc,"time_region":time_region}),
+                NotifyPayload::ProjectChanged { username, project } => json!({"type":"Notify","event":"ProjectChanged","username":username,"project":project}),
+                NotifyPayload::ProjectRequested { username, .. } => json!({"type":"Notify","event":"ProjectRequested","username":username}),
             },
             Packet::Message(p) => { let target = match &p.to { MessageTarget::Direct { username } => username.clone(), MessageTarget::Channel { channel } => format!("#{}", channel) }; json!({"type":"Message","from":p.from,"to":target,"body":p.body,"timestamp":p.timestamp,"datetime_utc":p.datetime_utc,"time_region":p.time_region}) }
             Packet::CreateTask(p) => json!({"type":"CreateTask","title":p.title}),
@@ -748,6 +787,7 @@ impl Packet {
             Packet::SyncScan(p) => json!({"type":"SyncScan","requester":p.requester,"target":p.target,"project":p.project}),
             Packet::SyncManifest(p) => json!({"type":"SyncManifest","requester":p.requester,"target":p.target,"file_count":p.files.len()}),
             Packet::SyncDone(p) => json!({"type":"SyncDone","requester":p.requester,"synced":p.files_synced,"skipped":p.files_skipped,"conflicts":p.conflicts}),
+            Packet::ProjectSelect(p) => json!({"type":"ProjectSelect","username":p.username,"project":p.project}),
             _ => json!({"type":self.describe()}),
         }
     }
