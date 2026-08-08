@@ -63,6 +63,22 @@ impl Crypto {
         Ok(plaintext)
     }
 
+    /// Create a Crypto instance directly from a 64-char hex key string.
+    pub fn from_hex(key_hex: &str) -> Result<Self> {
+        let key_hex = key_hex.trim();
+        if key_hex.len() != 64 {
+            anyhow::bail!(
+                "Key must be 64 hex characters (32 bytes), got {} characters",
+                key_hex.len()
+            );
+        }
+        let key_bytes = hex::decode(key_hex)
+            .with_context(|| "Failed to decode hex key — must be valid hexadecimal")?;
+        let cipher = Aes256Gcm::new_from_slice(&key_bytes)
+            .map_err(|_| anyhow::anyhow!("Invalid key length for AES-256-GCM"))?;
+        Ok(Self { cipher })
+    }
+
     /// Generate a fresh random 64-char hex key (for bootstrapping).
     pub fn generate_key() -> String {
         let mut key_bytes = [0u8; 32];

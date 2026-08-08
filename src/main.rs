@@ -22,6 +22,10 @@ use crate::swarm::SwarmState;
 #[derive(Parser)]
 #[command(name = "swarm", version, about)]
 struct Cli {
+    /// 64-char hex key directly (alternative to --key-file)
+    #[arg(short = 'K', long)]
+    key: Option<String>,
+
     /// Path to the key file (64-char hex AES-256 key)
     #[arg(short, long, default_value = "swarm.key")]
     key_file: PathBuf,
@@ -85,6 +89,10 @@ enum Commands {
         /// Output path for the key file
         #[arg(short, long, default_value = "swarm.key")]
         output: PathBuf,
+
+        /// Save this specific hex key instead of generating a new one
+        #[arg(short = 'k', long)]
+        key: Option<String>,
     },
 }
 
@@ -93,15 +101,17 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::GenKey { output } => {
-            let key = Crypto::generate_key();
+        Commands::GenKey { output, key } => {
+            let key = match key {
+                Some(hex) => hex,
+                None => Crypto::generate_key(),
+            };
             std::fs::write(&output, &key)?;
             println!("Key written to {}", output.display());
             println!("Share this key with all swarm members.");
         }
         Commands::Serve { username, role, workspace_mode } => {
-            // Load or create key
-            let crypto = load_or_create_key(&cli.key_file)?;
+            let crypto = load_key(&cli.key, &cli.key_file)?;
             let crypto = Arc::new(crypto);
 
             let bind_addr = SocketAddr::from(([0, 0, 0, 0], cli.port));
@@ -141,7 +151,7 @@ async fn main() -> anyhow::Result<()> {
             workspace_mode,
             project_root,
         } => {
-            let crypto = Crypto::from_key_file(&cli.key_file)?;
+            let crypto = load_key(&cli.key, &cli.key_file)?;
             let crypto = Arc::new(crypto);
 
             let port = server_port.unwrap_or(cli.port);
@@ -171,7 +181,10 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn load_or_create_key(path: &PathBuf) -> anyhow::Result<Crypto> {
+fn load_key(key_opt: &Option<String>, path: &PathBuf) -> anyhow::Result<Crypto> {
+    if let Some(hex) = key_opt {
+        return Crypto::from_hex(hex);
+    }
     if path.exists() {
         Crypto::from_key_file(path)
     } else {
