@@ -95,8 +95,21 @@ async fn handle_client(
         }
     });
 
-    // ── Main read loop ──
-    while let Some(frame_result) = framed.next().await {
+    // ── Main read loop (60s heartbeat timeout) ──
+    const READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+    loop {
+        let frame_result = tokio::time::timeout(READ_TIMEOUT, framed.next()).await;
+        let frame_result = match frame_result {
+            Ok(Some(f)) => f,
+            Ok(None) => break, // stream ended
+            Err(_elapsed) => {
+                // Read timeout — client is dead
+                if let Some(ref uname) = username {
+                    eprintln!("[SERVER] Heartbeat timeout — removing agent '{}'", uname);
+                }
+                break;
+            }
+        };
         let encrypted_frame = match frame_result {
             Ok(f) => f,
             Err(e) => {
