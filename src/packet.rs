@@ -510,4 +510,38 @@ impl Packet {
             Packet::DeleteFile(_) => "DELETE_FILE", Packet::MakeDir(_) => "MAKE_DIR",
         }
     }
+
+    /// Build a JSON value for pipe mode event output.
+    /// Includes packet type name and key payload fields so AI harnesses can inspect data.
+    pub fn to_event_json(&self) -> serde_json::Value {
+        use serde_json::json;
+        match self {
+            Packet::Join(p) => json!({"type":"Join","username":p.username,"role":p.role,"is_orchestrator":p.is_orchestrator}),
+            Packet::Leave(p) => json!({"type":"Leave","username":p.username,"reason":p.reason}),
+            Packet::Notify(n) => match n {
+                NotifyPayload::AgentJoined { username, role, is_orchestrator, .. } => json!({"type":"Notify","event":"AgentJoined","username":username,"role":role,"is_orchestrator":is_orchestrator}),
+                NotifyPayload::AgentLeft { username, reason } => json!({"type":"Notify","event":"AgentLeft","username":username,"reason":reason}),
+                NotifyPayload::TaskCreated { task_id, title, .. } => json!({"type":"Notify","event":"TaskCreated","task_id":task_id.to_string(),"title":title}),
+                NotifyPayload::TaskAssigned { task_id, username } => json!({"type":"Notify","event":"TaskAssigned","task_id":task_id.to_string(),"username":username}),
+                NotifyPayload::TaskCompleted { task_id, username, .. } => json!({"type":"Notify","event":"TaskCompleted","task_id":task_id.to_string(),"username":username}),
+                NotifyPayload::ChannelCreated { name, created_by, .. } => json!({"type":"Notify","event":"ChannelCreated","name":name,"created_by":created_by}),
+                NotifyPayload::ChannelJoined { channel_name, username } => json!({"type":"Notify","event":"ChannelJoined","channel":channel_name,"username":username}),
+                NotifyPayload::ChannelLeft { channel_name, username } => json!({"type":"Notify","event":"ChannelLeft","channel":channel_name,"username":username}),
+                NotifyPayload::ChannelDeleted { channel_name, deleted_by } => json!({"type":"Notify","event":"ChannelDeleted","channel":channel_name,"deleted_by":deleted_by}),
+                NotifyPayload::StatusUpdate { username, status, .. } => json!({"type":"Notify","event":"StatusUpdate","username":username,"status":status}),
+                NotifyPayload::MessageReceived { from, to, body } => json!({"type":"Notify","event":"MessageReceived","from":from,"to":to,"body":body}),
+            },
+            Packet::Message(p) => { let target = match &p.to { MessageTarget::Direct { username } => username.clone(), MessageTarget::Channel { channel } => format!("#{}", channel) }; json!({"type":"Message","from":p.from,"to":target,"body":p.body}) }
+            Packet::CreateTask(p) => json!({"type":"CreateTask","title":p.title}),
+            Packet::TakeTask(p) => json!({"type":"TakeTask","username":p.username,"count":p.task_ids.len()}),
+            Packet::Status(p) => json!({"type":"Status","username":p.username}),
+            Packet::CreateChannel(p) => json!({"type":"CreateChannel","name":p.name}),
+            Packet::TaskComplete(p) => json!({"type":"TaskComplete","username":p.username,"task_id":p.task_id.to_string()}),
+            Packet::AssignTask(p) => json!({"type":"AssignTask","assigned_by":p.assigned_by,"assign_to":p.assign_to}),
+            Packet::ToolCall(p) => json!({"type":"ToolCall","tool":p.tool_name,"target":p.target}),
+            Packet::SendFile(p) => json!({"type":"SendFile","path":p.path,"size":p.content.len()}),
+            Packet::ReceiveFile(p) => json!({"type":"ReceiveFile","path":p.path}),
+            _ => json!({"type":self.describe()}),
+        }
+    }
 }

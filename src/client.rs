@@ -221,7 +221,8 @@ async fn run_pipe_mode(
                     }
                     continue;
                 }
-                let _ = event_tx.send(json!({"type":"event","packet_type":packet.describe()}));
+                let event_json = packet.to_event_json();
+                let _ = event_tx.send(json!({"type":"event","data":event_json}));
                 continue;
             }
             if let Ok(response) = ResponsePacket::decode(&decrypted) {
