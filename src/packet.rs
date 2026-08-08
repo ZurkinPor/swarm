@@ -4,8 +4,14 @@ use uuid::Uuid;
 //
 // Every packet (after AES-256-GCM decryption):
 //   Byte 0:       packet_type (u8)
-//   Bytes 1-4:    payload_length (u32 BE)
-//   Bytes 5..:    payload (type-specific binary fields)
+//   Byte 1:       compression (u8) — 0x00 = none, 0x1B = zstd:11
+//                 (compression_algorithm << 4) | compression_level
+//                 Algorithm 0=none, 1=zstd
+//   Bytes 2-5:    uncompressed_payload_length (u32 BE)
+//   Bytes 6..:    payload (possibly zstd-compressed; type-specific binary fields)
+//
+// Compression threshold: payloads > 256 bytes are zstd:11 compressed
+// unless they are SendFile with incompressible content (video/audio/image).
 //
 // Primitives used within payloads:
 //   u8, u16 BE, u32 BE, u64 BE  — integers
@@ -115,24 +121,61 @@ impl Packet {
         }
     }
 
-    /// Full binary encode: [type: u8][payload_len: u32 BE][payload bytes]
+    /// Full binary encode: [type: u8][compression: u8][uncompressed_len: u32 BE][payload bytes]
     pub fn encode(&self) -> Vec<u8> {
         let payload = self.encode_payload();
-        let mut out = Vec::with_capacity(5 + payload.len());
+
+        // Decide whether to compress: skip compression for incompressible file types
+        let compressible = match self {
+            Packet::SendFile(p) => is_compressible_file(&p.path),
+            _ => true,
+        };
+
+        let (compression_byte, final_payload, uncompressed_len) =
+            if payload.len() > 256 && compressible {
+                match zstd::encode_all(&*payload, 11) {
+                    Ok(compressed) if compressed.len() < payload.len() => {
+                        (0x1B, compressed, payload.len() as u32)
+                    }
+                    _ => (0x00, payload.clone(), payload.len() as u32),
+                }
+            } else {
+                (0x00, payload.clone(), payload.len() as u32)
+            };
+
+        let mut out = Vec::with_capacity(6 + final_payload.len());
         out.push(self.type_id());
-        out.extend_from_slice(&(payload.len() as u32).to_be_bytes());
-        out.extend_from_slice(&payload);
+        out.push(compression_byte);
+        out.extend_from_slice(&uncompressed_len.to_be_bytes());
+        out.extend_from_slice(&final_payload);
         out
     }
 
-    /// Decode from binary bytes. Returns None if the data doesn't look like a binary packet.
+    /// Decode from binary bytes.
     pub fn decode(data: &[u8]) -> Result<Packet, &'static str> {
-        if data.is_empty() { return Err("empty packet"); }
+        if data.len() < 6 { return Err("packet too short for header"); }
         let id = data[0];
-        if data.len() < 5 { return Err("packet too short for header"); }
-        let payload_len = u32::from_be_bytes([data[1], data[2], data[3], data[4]]) as usize;
-        if data.len() < 5 + payload_len { return Err("payload truncated"); }
-        let mut r = BinReader::new(&data[5..5 + payload_len]);
+        let compression = data[1];
+        let uncompressed_len = u32::from_be_bytes([data[2], data[3], data[4], data[5]]) as usize;
+
+        let payload_data: Vec<u8> = if compression == 0x00 {
+            // No compression — payload is raw
+            if data.len() < 6 + uncompressed_len { return Err("payload truncated"); }
+            data[6..6 + uncompressed_len].to_vec()
+        } else if (compression >> 4) == 1 {
+            // zstd compressed
+            let level = compression & 0x0F;
+            let _ = level; // level recorded for reference, zstd auto-detects
+            zstd::decode_all(&data[6..]).map_err(|_| "zstd decompression failed")?
+        } else {
+            return Err("unknown compression algorithm");
+        };
+
+        if payload_data.len() != uncompressed_len {
+            return Err("decompressed size mismatch");
+        }
+
+        let mut r = BinReader::new(&payload_data);
         Self::from_type_id(id, &mut r)
     }
 
@@ -560,5 +603,156 @@ impl Packet {
             Packet::ListUsers(_) => json!({"type":"ListUsers"}),
             _ => json!({"type":self.describe()}),
         }
+    }
+}
+
+// ── Compression helpers ────────────────────────────────────
+
+/// Check whether a file should be compressed based on its extension.
+/// Code, documents, and binaries compress well.
+/// Video, audio, image, and archive formats are already compressed.
+pub fn is_compressible_file(path: &str) -> bool {
+    let ext = path.rsplit('.').next().unwrap_or("").to_lowercase();
+    match ext.as_str() {
+        // ── Code files (text, high compression ratio) ──
+        "rs" | "py" | "js" | "ts" | "jsx" | "tsx" | "c" | "cpp" | "cc" | "cxx" |
+        "h" | "hpp" | "hh" | "hxx" | "java" | "go" | "rb" | "php" | "swift" |
+        "kt" | "kts" | "scala" | "cs" | "fs" | "fsx" | "vb" | "pl" | "pm" |
+        "lua" | "r" | "m" | "mm" | "asm" | "s" | "nim" | "zig" | "ex" | "exs" |
+        "erl" | "hrl" | "hs" | "lhs" | "ml" | "mli" | "clj" | "cljs" | "edn" |
+        "dart" | "groovy" | "tf" | "proto" | "sol" | "vy" |
+        // Shell / script
+        "sh" | "bash" | "zsh" | "fish" | "ps1" | "bat" | "cmd" | "psm1" |
+        // ── Documents / markup (text, high compression) ──
+        "txt" | "md" | "rst" | "tex" | "latex" | "json" | "yaml" | "yml" |
+        "toml" | "xml" | "html" | "htm" | "xhtml" | "css" | "scss" | "sass" |
+        "less" | "csv" | "tsv" | "log" | "conf" | "ini" | "cfg" | "env" |
+        "sql" | "graphql" | "gql" | "ldif" | "bib" | "nix" | "dhall" |
+        // ── Binary executables / libraries (still compress well) ──
+        "exe" | "dll" | "lib" | "a" | "so" | "dylib" | "o" | "obj" | "wasm" |
+        "pdb" | "sys" | "ocx" | "drv" | "bin" | "elf" | "mach" | "class" |
+        // ── Document formats (XML-based, compress well) ──
+        "docx" | "xlsx" | "pptx" | "odt" | "ods" | "odp" | "svg" |
+        // ── Fonts ──
+        "ttf" | "otf" | "woff" | "woff2" |
+        // ── Misc compressible ──
+        "rtf" | "eml" | "mbox" | "ics" | "vcf" | "vcard" | "dif" => true,
+
+        // ── NOT compressed (already compressed formats) ──
+        // Video: "mp4" | "avi" | "mkv" | "mov" | "wmv" | "flv" | "webm" | "m4v" | "mpg" | "mpeg"
+        // Audio: "mp3" | "wav" | "flac" | "ogg" | "aac" | "wma" | "m4a" | "opus"
+        // Image:  "jpg" | "jpeg" | "png" | "gif" | "webp" | "bmp" | "tiff" | "ico" | "heic"
+        // Archive:"zip" | "gz" | "xz" | "7z" | "rar" | "tar" | "bz2" | "lz4" | "lzma" | "zst"
+        _ => false,
+    }
+}
+
+// ── Tests ──────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn roundtrip_no_compression_small() {
+        // Small payload (under 256 bytes) should NOT be compressed
+        let p = Packet::Leave(LeavePayload { username: "alice".into(), reason: Some("bye".into()) });
+        let enc = p.encode();
+        assert_eq!(enc[0], 2); // LEAVE type
+        assert_eq!(enc[1], 0x00); // no compression
+        let dec = Packet::decode(&enc).unwrap();
+        assert_eq!(p, dec);
+    }
+
+    #[test]
+    fn roundtrip_compressed_large() {
+        // Large text payload (> 256 bytes) should be compressed with zstd:11
+        let body = "A".repeat(500);
+        let p = Packet::Message(MessagePayload {
+            from: "alice".into(),
+            to: MessageTarget::Direct { username: "bob".into() },
+            body,
+        });
+        let enc = p.encode();
+        assert_eq!(enc[0], 7); // MESSAGE type
+        assert_eq!(enc[1], 0x1B); // zstd:11
+        let dec = Packet::decode(&enc).unwrap();
+        assert_eq!(p, dec);
+    }
+
+    #[test]
+    fn roundtrip_sendfile_compressible() {
+        // .rs file with large content — should be compressed
+        let big_content = vec![b'x'; 1024];
+        let p2 = Packet::SendFile(SendFilePayload {
+            requester: "alice".into(),
+            target: "bob".into(),
+            path: "src/big.rs".into(),
+            content: big_content.clone(),
+            overwrite: true,
+        });
+        let enc = p2.encode();
+        assert_eq!(enc[0], 20); // SEND_FILE type
+        assert_eq!(enc[1], 0x1B); // zstd:11 (1024 bytes of 'x' → very compressible)
+        let dec = Packet::decode(&enc).unwrap();
+        assert_eq!(p2, dec);
+    }
+
+    #[test]
+    fn roundtrip_sendfile_incompressible() {
+        // A .mp4 file — should NOT be compressed
+        let content = vec![0u8; 1024];
+        let p = Packet::SendFile(SendFilePayload {
+            requester: "alice".into(),
+            target: "bob".into(),
+            path: "video.mp4".into(),
+            content: content.clone(),
+            overwrite: false,
+        });
+        let enc = p.encode();
+        assert_eq!(enc[0], 20); // SEND_FILE type
+        assert_eq!(enc[1], 0x00); // no compression (incompressible file type)
+        let dec = Packet::decode(&enc).unwrap();
+        assert_eq!(p, dec);
+    }
+
+    #[test]
+    fn compressible_extensions() {
+        assert!(is_compressible_file("main.rs"));
+        assert!(is_compressible_file("app.py"));
+        assert!(is_compressible_file("lib.go"));
+        assert!(is_compressible_file("README.md"));
+        assert!(is_compressible_file("program.exe"));
+        assert!(is_compressible_file("library.dll"));
+        assert!(is_compressible_file("data.json"));
+        assert!(is_compressible_file("script.sh"));
+    }
+
+    #[test]
+    fn incompressible_extensions() {
+        assert!(!is_compressible_file("movie.mp4"));
+        assert!(!is_compressible_file("song.mp3"));
+        assert!(!is_compressible_file("photo.jpg"));
+        assert!(!is_compressible_file("icon.png"));
+        assert!(!is_compressible_file("archive.zip"));
+        assert!(!is_compressible_file("sound.wav"));
+        assert!(!is_compressible_file("image.gif"));
+    }
+
+    #[test]
+    fn compression_reduces_size() {
+        // Repeated text should compress dramatically
+        let content = vec![b'A'; 10000];
+        let p = Packet::SendFile(SendFilePayload {
+            requester: "alice".into(),
+            target: "bob".into(),
+            path: "data.txt".into(),
+            content: content.clone(),
+            overwrite: false,
+        });
+        let enc = p.encode();
+        let dec = Packet::decode(&enc).unwrap();
+        assert_eq!(p, dec);
+        // 10000 bytes of 'A' should compress much smaller
+        assert!(enc.len() < 500, "expected compressed size < 500, got {}", enc.len());
     }
 }
