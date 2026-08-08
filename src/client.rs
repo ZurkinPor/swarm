@@ -400,7 +400,7 @@ fn json_command_to_packet(cmd: &Value, username: &str) -> Result<Option<Packet>,
         "http-get" => { let target = cmd["target"].as_str().ok_or("'target' required")?; let url = cmd["url"].as_str().ok_or("'url' required")?; let mut args = json!({"url":url}); if let Some(t) = cmd["timeout"].as_u64() { args["timeout"] = json!(t); } Ok(Some(Packet::ToolCall(packet::ToolCallPayload { requester: username.to_string(), target: target.to_string(), tool_name: "http_get".into(), arguments: args }))) }
         "list-drives" => { let target = cmd["target"].as_str().ok_or("'target' required")?; Ok(Some(Packet::ToolCall(packet::ToolCallPayload { requester: username.to_string(), target: target.to_string(), tool_name: "list_drives".into(), arguments: serde_json::Value::Object(Default::default()) }))) }
         "rm" | "delete-file" => { let target = cmd["target"].as_str().ok_or("'target' required")?; let path = cmd["path"].as_str().ok_or("'path' required")?; Ok(Some(Packet::DeleteFile(packet::DeleteFilePayload { requester: username.to_string(), target: target.to_string(), path: path.to_string() }))) }
-        // ── FTP packet commands ──
+        // ── Swarm file transfer packet commands ──
         "send" | "upload" => {
             let target = cmd["target"].as_str().ok_or("'target' required")?;
             let local_path = cmd["local"].as_str().ok_or("'local' path required")?;
@@ -472,16 +472,16 @@ fn handle_p2p_request(packet: &Packet, our_username: &str) -> Option<ResponsePac
             eprintln!("[TOOL] {} from {} → {} ({})", payload.tool_name, payload.requester, if success { "OK" } else { "FAIL" }, output.chars().take(80).collect::<String>());
             Some(ResponsePacket::ToolCallResult { requester: payload.requester.clone(), tool_name: payload.tool_name.clone(), success, output })
         } else { None },
-        // ── Encrypted FTP ──
+        // ── Swarm File Transfer ──
         Packet::SendFile(payload) => if payload.target == our_username {
-            eprintln!("[FTP] Receiving file '{}' from {} ({} bytes b64)", payload.path, payload.requester, payload.content_b64.len());
+            eprintln!("[SWARM] Receiving file '{}' from {} ({} bytes b64)", payload.path, payload.requester, payload.content_b64.len());
             match base64_decode_and_write(&payload.path, &payload.content_b64, payload.overwrite) {
                 Ok(bytes) => Some(ResponsePacket::SendFileResult { requester: payload.requester.clone(), path: payload.path.clone(), bytes_written: bytes }),
                 Err(e) => Some(ResponsePacket::Error { requester: payload.requester.clone(), message: e }),
             }
         } else { None },
         Packet::ReceiveFile(payload) => if payload.target == our_username {
-            eprintln!("[FTP] Sending file '{}' to {}", payload.path, payload.requester);
+            eprintln!("[SWARM] Sending file '{}' to {}", payload.path, payload.requester);
             match base64_encode_file(&payload.path, payload.max_bytes.unwrap_or(10_000_000)) {
                 Ok((b64, size)) => Some(ResponsePacket::ReceiveFileResult { requester: payload.requester.clone(), path: payload.path.clone(), content_b64: b64, size_bytes: size }),
                 Err(e) => Some(ResponsePacket::Error { requester: payload.requester.clone(), message: e }),
@@ -507,18 +507,18 @@ fn handle_response(resp: &ResponsePacket) {
         ResponsePacket::ToolCallResult { tool_name, success, output, .. } => println!("[TOOL:{}] {}: {}", tool_name, if *success { "OK" } else { "FAILED" }, output),
         ResponsePacket::ChannelListResult { channels, .. } => if channels.is_empty() { println!("[CHANNELS] No visible channels."); } else { println!("[CHANNELS]"); for ch in channels { println!("  #{} ({} members, {} by {})", ch.name, ch.member_count, ch.visibility, ch.created_by); if let Some(desc) = &ch.description { if !desc.is_empty() { println!("    {}", desc); } } } }
         ResponsePacket::Error { message, .. } => println!("[ERROR] {}", message),
-        ResponsePacket::SendFileResult { path, bytes_written, .. } => println!("[FTP] Sent '{}' — {} bytes written", path, bytes_written),
+        ResponsePacket::SendFileResult { path, bytes_written, .. } => println!("[SWARM] Sent '{}' — {} bytes written", path, bytes_written),
         ResponsePacket::ReceiveFileResult { path, content_b64, size_bytes, .. } => {
-            println!("[FTP] Received '{}' — {} bytes (b64: {} chars)", path, size_bytes, content_b64.len());
+            println!("[SWARM] Received '{}' — {} bytes (b64: {} chars)", path, size_bytes, content_b64.len());
             // Auto-decode and save to current directory
             let local_name = std::path::Path::new(path).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| path.clone());
             match base64_decode_and_write(&local_name, content_b64, true) {
-                Ok(written) => println!("[FTP] Decoded and saved as './{}' ({} bytes)", local_name, written),
-                Err(e) => eprintln!("[FTP] Failed to save received file: {}", e),
+                Ok(written) => println!("[SWARM] Decoded and saved as './{}' ({} bytes)", local_name, written),
+                Err(e) => eprintln!("[SWARM] Failed to save received file: {}", e),
             }
         }
-        ResponsePacket::DeleteFileResult { path, deleted, .. } => println!("[FTP] Delete '{}': {}", path, if *deleted { "OK" } else { "FAILED (not found?)" }),
-        ResponsePacket::MakeDirResult { path, created, .. } => println!("[FTP] Mkdir '{}': {}", path, if *created { "OK" } else { "FAILED" }),
+        ResponsePacket::DeleteFileResult { path, deleted, .. } => println!("[SWARM] Delete '{}': {}", path, if *deleted { "OK" } else { "FAILED (not found?)" }),
+        ResponsePacket::MakeDirResult { path, created, .. } => println!("[SWARM] Mkdir '{}': {}", path, if *created { "OK" } else { "FAILED" }),
     }
 }
 
@@ -617,7 +617,7 @@ fn parse_command(line: &str, username: &str) -> Option<Packet> {
         "todos" => { let mut sub = rest.splitn(2, ' '); let target = sub.next()?; let todo_args = sub.next().unwrap_or("[]"); let todos: Value = serde_json::from_str(todo_args).ok()?; Some(Packet::ToolCall(packet::ToolCallPayload { requester: username.to_string(), target: target.to_string(), tool_name: "write_todos".into(), arguments: json!({"path":"TODO.md","todos":todos}) })) }
         "http-get" => { let mut sub = rest.splitn(2, ' '); let target = sub.next()?; let url = sub.next()?; Some(Packet::ToolCall(packet::ToolCallPayload { requester: username.to_string(), target: target.to_string(), tool_name: "http_get".into(), arguments: json!({"url":url}) })) }
         "list-drives" => { let target = rest.trim(); if target.is_empty() { return None; } Some(Packet::ToolCall(packet::ToolCallPayload { requester: username.to_string(), target: target.to_string(), tool_name: "list_drives".into(), arguments: serde_json::Value::Object(Default::default()) })) }
-        // ── FTP packet commands ──
+        // ── Swarm file transfer packet commands ──
         "send" | "upload" => {
             let mut sub = rest.splitn(3, ' ');
             let target = match sub.next() { Some(t) => t, None => { println!("Usage: send <target> <local_path> <remote_path>"); return None; } };
@@ -627,15 +627,15 @@ fn parse_command(line: &str, username: &str) -> Option<Packet> {
             const MAX_SEND: u64 = 10_000_000;
             match std::fs::metadata(local) {
                 Ok(meta) if meta.len() > MAX_SEND => {
-                    println!("[FTP] File too large: {:.1} MB (max: {} MB)", meta.len() as f64 / 1_000_000.0, MAX_SEND / 1_000_000);
+                    println!("[SWARM] File too large: {:.1} MB (max: {} MB)", meta.len() as f64 / 1_000_000.0, MAX_SEND / 1_000_000);
                     return Some(Packet::Status(packet::StatusPayload { username: username.to_string(), status: packet::AgentStatus::Idle, task_id: None, progress_pct: None, message: None }));
                 }
-                Err(e) => { println!("[FTP] Cannot read '{}': {}", local, e); return Some(Packet::Status(packet::StatusPayload { username: username.to_string(), status: packet::AgentStatus::Idle, task_id: None, progress_pct: None, message: None })); }
+                Err(e) => { println!("[SWARM] Cannot read '{}': {}", local, e); return Some(Packet::Status(packet::StatusPayload { username: username.to_string(), status: packet::AgentStatus::Idle, task_id: None, progress_pct: None, message: None })); }
                 _ => {}
             }
-            let bytes = match std::fs::read(local) { Ok(b) => b, Err(e) => { println!("[FTP] Failed to read '{}': {}", local, e); return Some(Packet::Status(packet::StatusPayload { username: username.to_string(), status: packet::AgentStatus::Idle, task_id: None, progress_pct: None, message: None })); } };
+            let bytes = match std::fs::read(local) { Ok(b) => b, Err(e) => { println!("[SWARM] Failed to read '{}': {}", local, e); return Some(Packet::Status(packet::StatusPayload { username: username.to_string(), status: packet::AgentStatus::Idle, task_id: None, progress_pct: None, message: None })); } };
             let b64 = base64_encode(&bytes);
-            println!("[FTP] Sending '{}' ({} bytes) → {}:{}", local, bytes.len(), target, remote);
+            println!("[SWARM] Sending '{}' ({} bytes) → {}:{}", local, bytes.len(), target, remote);
             Some(Packet::SendFile(packet::SendFilePayload { requester: username.to_string(), target: target.to_string(), path: remote.to_string(), content_b64: b64, overwrite: false }))
         }
         "recv" | "download" => {
@@ -660,7 +660,7 @@ fn parse_command(line: &str, username: &str) -> Option<Packet> {
     }
 }
 
-// ── FTP helpers (base64 encode/decode) ──
+// ── Base64 helpers for Swarm file transfer ──
 
 fn base64_decode_and_write(path: &str, b64: &str, overwrite: bool) -> Result<u64, String> {
     if !overwrite && std::path::Path::new(path).exists() {
@@ -747,7 +747,7 @@ fn list_local_dir(path: &str, recursive: bool) -> anyhow::Result<Vec<packet::Dir
 
 fn print_help() {
     println!("Swarm Client Commands:");
-    println!("  Channels (private, encrypted Discord/Slack):");
+    println!("  Swarm Channels (self-contained encrypted chat):");
     println!("  channel <name> [desc] [--private]  Create a channel");
     println!("  channels                            List visible channels");
     println!("  join <name>                         Join a channel");
@@ -779,7 +779,7 @@ fn print_help() {
     println!("  todos <t> [json_array]              Write TODO.md on a remote agent");
     println!("  http-get <t> <url>                  HTTP GET on a remote agent");
     println!("  list-drives <t>                     List drives on a remote agent");
-    println!("  FTP (encrypted file transfer as packets — no tool overhead):");
+    println!("  Swarm File Transfer (first-class encrypted packets, no external protocol):");
     println!("  send <t> <local> <remote>           Upload a file (max 10MB)");
     println!("  recv <t> <remote_path>              Download a file");
     println!("  rm <t> <path>                       Delete a file");

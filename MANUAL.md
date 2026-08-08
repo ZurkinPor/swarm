@@ -1,6 +1,6 @@
 # Swarm Manual
 
-A peer-to-peer TCP protocol for AI agent orchestration — think of it as a private, encrypted **Discord + Slack + IRC + FTP + SSH + Task Manager** in one binary.
+A self-contained peer-to-peer TCP protocol for AI agent orchestration — Swarm **replaces** the need for separate tools like Discord, Slack, IRC, FTP, SSH, shared drives, and task managers. Everything runs through Swarm's own encrypted packet types over a single TCP connection. No external protocols or services are used.
 
 ---
 
@@ -151,7 +151,9 @@ swarm> msg alice Hey, how's the login task going?
 swarm> msg #general Build failed — can anyone take a look?
 ```
 
-### Channels (Private, Encrypted Discord/Slack)
+### Swarm Channels (Encrypted, Self-Contained)
+
+Swarm channels are the protocol's own encrypted communication groups — no Discord, Slack, or IRC needed. Channels are created, joined, and managed entirely through Swarm packet types.
 
 | Command | Description |
 |---|---|
@@ -213,16 +215,16 @@ swarm> ls bob:C:/projects
   f Cargo.toml (512b)
 ```
 
-### Encrypted FTP (File Transfer as Packets)
+### Swarm File Transfer (Built-In, No External Protocol)
 
-Dedicated packet types for file operations — faster than tool calls, no overhead.
+Swarm has its own encrypted file transfer built directly into the packet layer. These are first-class Swarm packets (#20–#23) — no FTP, FTPS, or SFTP is used. Files are encrypted with the same AES-256-GCM key as everything else.
 
 | Command | Description |
 |---|---|
-| `send <t> <local> <remote>` | Upload a file (max 10MB, base64-encoded) |
-| `recv <t> <remote_path>` | Download a file from a remote agent |
-| `rm <t> <path>` | Delete a file on a remote agent |
-| `mkdir <t> <path>` | Create a directory on a remote agent (recursive) |
+| `send <t> <local> <remote>` | Upload a file via Swarm's SEND_FILE packet (max 10MB) |
+| `recv <t> <remote_path>` | Download a file via Swarm's RECEIVE_FILE packet |
+| `rm <t> <path>` | Delete a file via Swarm's DELETE_FILE packet |
+| `mkdir <t> <path>` | Create a directory via Swarm's MAKE_DIR packet (recursive) |
 
 **Examples:**
 ```
@@ -234,7 +236,9 @@ swarm> mkdir bob /home/bob/new-feature
 
 Received files are auto-saved to the current directory (stripped of their remote path).
 
-### Remote Tools (via ToolCall packets)
+### Remote Tools (via Swarm TOOL_CALL packets)
+
+These commands invoke tools on remote agents through Swarm's `TOOL_CALL` packet (#12). Unlike file transfer packets which are routed directly, tool calls go through Swarm's generic tool executor.
 
 | Command | Description |
 |---|---|
@@ -481,7 +485,7 @@ Leader>   assign a1b2-... alice            ← delegates other tasks
 
 ## Channel System
 
-Channels are like Discord/Slack channels — private, encrypted communication groups.
+Channels are Swarm's own encrypted communication groups — a built-in replacement for chat tools like Discord, Slack, and IRC. No external chat protocol is used; channels are created, joined, and messaged entirely through Swarm packet types (#7, #8, #14–#18).
 
 ### Visibility
 
@@ -517,7 +521,18 @@ All channel events are broadcast to every agent:
 
 Swarm supports three types of remote operations on other agents:
 
-### 1. P2P Packets (server-routed)
+### 1. Swarm File Transfer Packets (server-routed)
+
+| Packet | Description |
+|---|---|
+| `SEND_FILE` (#20) | Upload a file to target (base64, max 10MB) |
+| `RECEIVE_FILE` (#21) | Request a file from target |
+| `DELETE_FILE` (#22) | Delete a file on target |
+| `MAKE_DIR` (#23) | Create a directory on target |
+
+These are Swarm's own file transfer packets — no FTP/FTPS/SFTP is used. Files are encrypted with AES-256-GCM along with the outer frame.
+
+### 2. P2P Query Packets (server-routed)
 
 | Packet | Description |
 |---|---|
@@ -527,21 +542,21 @@ Swarm supports three types of remote operations on other agents:
 
 These go through the server which forwards them to the target agent. Responses come back the same way.
 
-### 2. Tool Calls (JSON)
+### 3. Tool Calls (JSON)
 
 ```
 swarm> tool bob write_file {"path":"hello.txt","content":"world"}
 ```
 
-The `TOOL_CALL` packet (#12) invokes a named tool on the target. Any tool in the registry (16 built-in) is available.
+The `TOOL_CALL` packet (#12) invokes a named tool on the target. Any tool in the registry (37 total) is available. No SSH or remote shell — Swarm's own `run_command` tool handles shell execution.
 
-### 3. Binary Tool Calls (Compact)
+### 4. Binary Tool Calls (Compact)
 
 ```
 swarm> btc bob 1 {"path":"test.txt","content":"binary!"}
 ```
 
-Same functionality as JSON tool calls, but encoded in a compact binary format with 12-byte overhead instead of full JSON serialization.
+Same functionality as JSON tool calls, but encoded in Swarm's compact binary format with 12-byte overhead instead of full JSON serialization.
 
 ---
 
@@ -627,7 +642,7 @@ Use `tools-list` at the interactive prompt to see the full registry, or `{"cmd":
 | Heartbeat | 60-second read timeout |
 | Offline Messages | Queued, delivered on reconnect |
 | Multi-client | Async tasks, one per connection |
-| FTP Max Size | 10 MB per file (base64-encoded) |
+| File Transfer Max | 10 MB per file (base64-encoded in Swarm packet) |
 
 ### Packet Types (23 total)
 
@@ -700,10 +715,10 @@ swarm> status Working on login timeout
 swarm> done a1b2c3d4-...
 ```
 
-### Example 3: Remote Tool Execution + FTP
+### Example 3: Remote Tool Execution + Swarm File Transfer
 
 ```bash
-# Alice runs tools and FTP transfers on Bob's machine
+# Alice runs tools and Swarm file transfers on Bob's machine
 swarm> whoami bob
   [TOOL:whoami] OK: bob@bob-pc (windows)
 
@@ -718,20 +733,20 @@ swarm> ls bob:D:/projects
 swarm> cp bob D:/projects/main.rs D:/backup/main.rs.bak
   [TOOL:copy_file] OK: Copied 4096 bytes
 
-# FTP commands (fast, dedicated packets, not tool calls)
+# Swarm file transfer (first-class packets, not tool calls — no FTP needed)
 swarm> send bob ./build.exe D:/deploy/build.exe
-  [FTP] Sending './build.exe' (2600000 bytes) → bob:D:/deploy/build.exe
-  [FTP] Sent 'D:/deploy/build.exe' — 2600000 bytes written
+  [SWARM] Sending './build.exe' (2600000 bytes) → bob:D:/deploy/build.exe
+  [SWARM] Sent 'D:/deploy/build.exe' — 2600000 bytes written
 
 swarm> recv bob D:/projects/notes.md
-  [FTP] Received 'notes.md' — 1024 bytes (b64: 1368 chars)
-  [FTP] Decoded and saved as './notes.md' (1024 bytes)
+  [SWARM] Received 'notes.md' — 1024 bytes (b64: 1368 chars)
+  [SWARM] Decoded and saved as './notes.md' (1024 bytes)
 
 swarm> rm bob /tmp/old-log.txt
-  [FTP] Delete '/tmp/old-log.txt': OK
+  [SWARM] Delete '/tmp/old-log.txt': OK
 
 swarm> mkdir bob D:/new-project/src
-  [FTP] Mkdir 'D:/new-project/src': OK
+  [SWARM] Mkdir 'D:/new-project/src': OK
 ```
 
 ### Example 4: AI Harness via Pipe Mode
@@ -773,7 +788,7 @@ swarm> take c3d4e5f6-...
 - 64-character hex key — possession of key = access
 - Private by default — not discoverable without key and IP
 - No built-in auth beyond the shared key
-- **Remote execution is powerful** — `TOOL_CALL`, `run_command`, and `http_get` can execute arbitrary code on remote machines. Only trusted agents should join the swarm.
+- **Remote execution is powerful** — Swarm's own `TOOL_CALL`, `run_command`, and `http_get` can execute arbitrary code on remote machines. No SSH or remote shell is involved — commands run through Swarm packets. Only trusted agents should join the swarm.
 
 ---
 

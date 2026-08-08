@@ -2,9 +2,9 @@
 
 ## Overview
 
-**Swarm** is a peer-to-peer (P2P) TCP-based protocol written in Rust that enables AI agents to orchestrate, cooperate, and work together as a swarm across multiple computers. It provides messaging channels, role-based usernames, task assignment, and distributed tool execution.
+**Swarm** is a self-contained, peer-to-peer (P2P) TCP-based protocol written in Rust that enables AI agents to orchestrate, cooperate, and work together as a swarm across multiple computers. It provides messaging channels, role-based usernames, task assignment, distributed tool execution, and encrypted file transfer — all through its own packet types over a single encrypted TCP connection. No external protocols or services are used.
 
-Think of it as a unified, fully private and encrypted alternative to IRC, Discord, Slack, FTP/FTPS, shared directories, SSH, and headless remote desktop (CLI-based, no keyboard/mouse/GUI capture). Channels work like a private, encrypted Discord or Slack server — you can create channels, join them, leave them, send messages to them, hide channels you don't want to see, and delete channels you own. Every message, every channel, and every byte of data is encrypted. Unlike those tools — where only some support encryption and often as an afterthought — Swarm encrypts **everything** by default: every message, every file listing, every tool call, every HTTP request, and every byte of data transferred between agents. The protocol aims to cover all the capabilities those tools provide, wrapped in a single encrypted channel.
+Swarm is designed as an **all-in-one replacement** for the fragmented ecosystem of collaboration tools. Where you would normally need separate tools for chat (IRC, Discord, Slack), file transfer (FTP/FTPS, SCP, shared drives), remote command execution (SSH), and task management (Jira, Trello), Swarm provides all of these capabilities through one unified, encrypted protocol. It does **not** wrap, proxy, or depend on any of those protocols — it replaces them entirely with its own packet types (#1–#23). Every message, every file listing, every tool call, every HTTP request, and every byte of data transferred between agents is encrypted with AES-256-GCM by default, with no plaintext ever touching the wire.
 
 ## Technical Details
 
@@ -81,7 +81,7 @@ Swarm supports two workspace modes:
 
 1. **Git mode (default)** — Each agent has the same GitHub project cloned locally on its own machine. All agents work independently on their local copies, communicating changes and coordinating via the swarm. This is the recommended setup for most development workflows.
 
-2. **Single-host mode (non-Git)** — The project lives as a plain folder on one agent's computer — no Git required. Other agents issue tool calls, FTP transfers, file listings, and HTTP requests over TCP against that host agent's machine. Useful for quick collaboration, legacy projects, or any folder-based work where setting up Git isn't desired.
+2. **Single-host mode (non-Git)** — The project lives as a plain folder on one agent's computer — no Git required. Other agents issue tool calls, Swarm file transfers, file listings, and HTTP requests over TCP against that host agent's machine. Useful for quick collaboration, legacy projects, or any folder-based work where setting up Git isn't desired.
 
 In either mode, agents can also create local files unrelated to the project (notes, documentation, drafts, etc.) and hand them off to other agents as needed.
 
@@ -112,10 +112,10 @@ All communication uses structured packets. Each packet has a **type** field and 
 | 12 | `TOOL_CALL` | Client → Target Agent | Invoke a named tool on the target agent's machine with supplied arguments. Results are returned. |
 | 13 | `TASK_COMPLETE` | Client → Server | Agent notifies the swarm that a task is finished, optionally including results or artifacts. |
 | 19 | `ASSIGN_TASK` | Client → Server | Orchestrator assigns a pending task to a specific agent. Only orchestrators can send this. Non-orchestrator agents cannot `take` tasks when an orchestrator is present. |
-| 20 | `SEND_FILE` | Client → Target Agent | Upload a file to a remote agent (base64-encoded in payload, max 10MB). Encrypted FTP — file content is encrypted along with the packet. |
+| 20 | `SEND_FILE` | Client → Target Agent | Upload a file to a remote agent via Swarm's encrypted file transfer (base64-encoded payload, max 10MB). Content is encrypted along with the outer frame. |
 | 21 | `RECEIVE_FILE` | Client → Target Agent | Request a file from a remote agent. The target reads the file and returns it base64-encoded in the response. |
-| 22 | `DELETE_FILE` | Client → Target Agent | Delete a file on a remote agent. Dedicated FTP packet (not a tool call) for fast, encrypted file deletion. |
-| 23 | `MAKE_DIR` | Client → Target Agent | Create a directory (recursively) on a remote agent. Dedicated FTP packet for encrypted directory creation. |
+| 22 | `DELETE_FILE` | Client → Target Agent | Delete a file on a remote agent. First-class Swarm packet (not a tool call) — fast, encrypted file deletion. |
+| 23 | `MAKE_DIR` | Client → Target Agent | Create a directory recursively on a remote agent. First-class Swarm packet for encrypted directory creation. |
 
 ### Orchestrator Mode
 
@@ -145,16 +145,16 @@ Next ..:   args_json   (UTF-8 JSON)
 
 Total overhead: **12 bytes + target + requester** — substantially smaller than JSON for large tool calls. 37 tools are registered with IDs from `0x01` to `0x93`. Server detects the `0x01` magic byte after decryption and forwards to the target agent. The target executes the tool and returns a JSON response as usual.
 
-### Encrypted FTP
+### Swarm File Transfer
 
-File transfer is done via dedicated packet types (#20–#23), not tool calls:
+Swarm has its own encrypted file transfer protocol built directly into the packet layer (#20–#23). There is no separate FTP/FTPS/SFTP sub-protocol — file operations are first-class Swarm packets, encrypted with the same AES-256-GCM key as everything else:
 
 - **SEND_FILE** — Upload a file to a remote agent. Content is base64-encoded. Max 10MB per transfer. Server forwards to target; target writes the file and returns bytes written.
 - **RECEIVE_FILE** — Request a file from a remote agent. Server forwards to target; target reads and base64-encodes, returns content.
-- **DELETE_FILE** — Delete a file on a remote agent. Fast, no tool overhead.
-- **MAKE_DIR** — Create a directory (recursively) on a remote agent.
+- **DELETE_FILE** — Delete a file on a remote agent. First-class packet with no tool call overhead.
+- **MAKE_DIR** — Create a directory recursively on a remote agent. First-class packet.
 
-Unlike tool calls, these are first-class packets that the server routes directly with minimal overhead. All transfers are AES-256-GCM encrypted along with the outer frame.
+Unlike tool calls (which serialize through JSON and a generic executor), these packets are routed directly by the server with minimal overhead. All transfers are encrypted with AES-256-GCM along with the outer frame — there is no separate encryption layer or protocol negotiation.
 
 ### Packet Lifecycle Example
 
@@ -173,7 +173,7 @@ Unlike tool calls, these are first-class packets that the server routes directly
 5. **Agent B** sends `HIDE_CHANNEL` → **Server** hides the channel from Agent B's list. Agent B is still a member.
 6. **Agent A** sends `DELETE_CHANNEL` → **Server** removes the channel entirely. Broadcasts `ChannelDeleted`.
 
-### FTP Lifecycle Example
+### File Transfer Lifecycle Example
 
 1. **Agent A** sends `SEND_FILE` → **Server** forwards to **Agent B**. Agent B writes the file to disk and responds with bytes written.
 2. **Agent A** sends `RECEIVE_FILE` → **Server** forwards to **Agent B**. Agent B reads the file, base64-encodes it, and returns the content.
@@ -189,13 +189,13 @@ Unlike tool calls, these are first-class packets that the server routes directly
 - **Notifications** — Server pushes swarm events (joins, leaves, task changes, channel events) to all connected agents.
 - **Messaging** — Direct (1-to-1) and channel-based (many-to-many) text communication.
 
-### Channels (Private, Encrypted Discord/Slack)
-- **Create Channels** — Any agent can create a named channel with an optional description.
+### Swarm Channels (Encrypted, Self-Contained)
+- **Create Channels** — Any agent can create a named channel with an optional description. No external chat service is used — channels are Swarm's own packet-driven communication groups.
 - **Join / Leave Channels** — Agents can join open channels or leave channels they're in.
 - **List Channels** — View all channels visible to the agent (hides channels the agent has hidden).
 - **Delete Channels** — The channel creator can delete their channel, removing it from the swarm.
 - **Hide Channels** — Hide a channel from your view without leaving it. Useful for muting noisy channels.
-- **Channel Messaging** — Send messages to a channel; all members receive them (like Discord/Slack).
+- **Channel Messaging** — Send messages to a channel via Swarm's `MESSAGE` packet; all members receive them. This replaces the need for separate chat tools like Discord, Slack, or IRC — Swarm handles it all natively.
 
 ### Task Management
 - **Create Tasks** — Any agent can propose a task with description, priority, and target role.
@@ -203,13 +203,15 @@ Unlike tool calls, these are first-class packets that the server routes directly
 - **Status Reporting** — Agents periodically report progress (idle, busy, % complete).
 - **Completion Notification** — Agents signal when a task is done, with optional deliverable.
 
-### Remote File System Access
-- **List Drives** — Enumerate mounted volumes on a remote agent's machine.
-- **List Directories** — Browse directory trees (flat or recursive) on a remote agent.
+### Swarm File Transfer
+- **Send / Receive Files** — Upload and download files between agents via dedicated Swarm packets (#20–#21). No external FTP/FTPS/SFTP protocol — Swarm has its own encrypted file transfer built into the packet layer.
+- **Delete Files / Make Directories** — Remote file deletion and directory creation via Swarm packets (#22–#23).
+- **List Drives** — Enumerate mounted volumes on a remote agent's machine (#9).
+- **List Directories** — Browse directory trees on a remote agent (#10).
 
 ### Remote Execution
-- **HTTP Requests** — Ask a remote agent to issue HTTP calls (REST, scraping, API interaction) from its machine.
-- **Tool Calls** — Invoke arbitrary tools/functions on a remote agent's machine, enabling distributed computing.
+- **Tool Calls** — Invoke any of 37 tools on a remote agent's machine via Swarm packets (#12), enabling distributed computing. No SSH or remote shell — Swarm's own `run_command` tool executes commands and returns output.
+- **HTTP Requests** — Ask a remote agent to issue HTTP calls (REST, scraping, API interaction) from its machine (#11).
 
 ### Collaborative Development
 - Agents work on the same GitHub project cloned across all machines.
