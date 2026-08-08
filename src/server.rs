@@ -547,6 +547,27 @@ async fn process_packet(
             )
             .await;
         }
+
+        Packet::ListUsers(payload) => {
+            let state = state.lock().await;
+            let agents: Vec<packet::UserInfo> = state
+                .list_agents()
+                .iter()
+                .map(|a| packet::UserInfo {
+                    username: a.username.clone(),
+                    role: a.role.clone(),
+                    is_orchestrator: a.is_orchestrator,
+                })
+                .collect();
+            send_response_to(
+                crypto,
+                tx,
+                &ResponsePacket::UserListResult {
+                    requester: payload.requester.clone(),
+                    agents,
+                },
+            );
+        }
     }
 }
 
@@ -594,6 +615,7 @@ fn get_requester_from_response(resp: &ResponsePacket) -> String {
         | ResponsePacket::DeleteFileResult { requester, .. }
         | ResponsePacket::MakeDirResult { requester, .. }
         | ResponsePacket::Error { requester, .. } => requester.clone(),
+        ResponsePacket::UserListResult { requester, .. } => requester.clone(),
     }
 }
 

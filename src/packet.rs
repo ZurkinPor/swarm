@@ -81,6 +81,7 @@ impl Packet {
             Packet::ReceiveFile(_) => 21,
             Packet::DeleteFile(_) => 22,
             Packet::MakeDir(_) => 23,
+            Packet::ListUsers(_) => 24,
         }
     }
 
@@ -109,6 +110,7 @@ impl Packet {
             21 => Ok(Packet::ReceiveFile(ReceiveFilePayload::decode(r)?)),
             22 => Ok(Packet::DeleteFile(DeleteFilePayload::decode(r)?)),
             23 => Ok(Packet::MakeDir(MakeDirPayload::decode(r)?)),
+            24 => Ok(Packet::ListUsers(ListUsersPayload::decode(r)?)),
             _ => Err("unknown packet type"),
         }
     }
@@ -159,6 +161,7 @@ impl Packet {
             Packet::ReceiveFile(p) => p.encode(),
             Packet::DeleteFile(p) => p.encode(),
             Packet::MakeDir(p) => p.encode(),
+            Packet::ListUsers(p) => p.encode(),
         }
     }
 }
@@ -190,6 +193,7 @@ pub enum Packet {
     ReceiveFile(ReceiveFilePayload),
     DeleteFile(DeleteFilePayload),
     MakeDir(MakeDirPayload),
+    ListUsers(ListUsersPayload),
 }
 
 // ── Payload structs with encode/decode ───────────────────────
@@ -466,6 +470,13 @@ impl MakeDirPayload {
     fn decode(r: &mut BinReader) -> Result<Self, &'static str> { Ok(Self { requester: r.str8()?, target: r.str8()?, path: r.str16()? }) }
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct ListUsersPayload { pub requester: String }
+impl ListUsersPayload {
+    fn encode(&self) -> Vec<u8> { let mut w = BinWriter::new(); w.str8(&self.requester); w.finish() }
+    fn decode(r: &mut BinReader) -> Result<Self, &'static str> { Ok(Self { requester: r.str8()? }) }
+}
+
 // ── Response packets (still use serde for internal routing, but now with binary wire format too) ──
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -481,7 +492,11 @@ pub enum ResponsePacket {
     ReceiveFileResult { requester: String, path: String, content: Vec<u8>, size_bytes: u64 },
     DeleteFileResult { requester: String, path: String, deleted: bool },
     MakeDirResult { requester: String, path: String, created: bool },
+    UserListResult { requester: String, agents: Vec<UserInfo> },
 }
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+pub struct UserInfo { pub username: String, pub role: Option<String>, pub is_orchestrator: bool }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 pub struct DirEntry { pub name: String, pub is_dir: bool, pub size_bytes: u64 }
@@ -507,7 +522,8 @@ impl Packet {
             Packet::ListDrives(_) => "LIST_DRIVES", Packet::ListDir(_) => "LIST_DIR", Packet::HttpRequest(_) => "HTTP_REQUEST",
             Packet::ToolCall(_) => "TOOL_CALL", Packet::TaskComplete(_) => "TASK_COMPLETE", Packet::AssignTask(_) => "ASSIGN_TASK",
             Packet::SendFile(_) => "SEND_FILE", Packet::ReceiveFile(_) => "RECEIVE_FILE",
-            Packet::DeleteFile(_) => "DELETE_FILE", Packet::MakeDir(_) => "MAKE_DIR",
+            Packet::DeleteFile(_) => "DELETE_FILE",            Packet::MakeDir(_) => "MAKE_DIR",
+            Packet::ListUsers(_) => "LIST_USERS",
         }
     }
 
@@ -541,6 +557,7 @@ impl Packet {
             Packet::ToolCall(p) => json!({"type":"ToolCall","tool":p.tool_name,"target":p.target}),
             Packet::SendFile(p) => json!({"type":"SendFile","path":p.path,"size":p.content.len()}),
             Packet::ReceiveFile(p) => json!({"type":"ReceiveFile","path":p.path}),
+            Packet::ListUsers(_) => json!({"type":"ListUsers"}),
             _ => json!({"type":self.describe()}),
         }
     }

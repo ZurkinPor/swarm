@@ -319,6 +319,7 @@ fn json_command_to_packet(cmd: &Value, username: &str) -> Result<Option<Packet>,
             Ok(Some(Packet::CreateChannel(packet::CreateChannelPayload { name: name.to_string(), created_by: username.to_string(), description, visibility: Some(if is_private { "private".into() } else { "public".into() }) })))
         }
         "channels" => Ok(Some(Packet::ListChannels(packet::ListChannelsPayload { requester: username.to_string() }))),
+        "users" | "who" => Ok(Some(Packet::ListUsers(packet::ListUsersPayload { requester: username.to_string() }))),
         "join" => { let name = cmd["name"].as_str().ok_or("'name' required")?; Ok(Some(Packet::JoinChannel(packet::JoinChannelPayload { channel_name: name.to_string(), username: username.to_string() }))) }
         "leave" => { let name = cmd["name"].as_str().ok_or("'name' required")?; Ok(Some(Packet::LeaveChannel(packet::LeaveChannelPayload { channel_name: name.to_string(), username: username.to_string() }))) }
         "delete-channel" => { let name = cmd["name"].as_str().ok_or("'name' required")?; Ok(Some(Packet::DeleteChannel(packet::DeleteChannelPayload { channel_name: name.to_string(), requested_by: username.to_string() }))) }
@@ -458,6 +459,18 @@ fn handle_response(resp: &ResponsePacket) {
         }
         ResponsePacket::DeleteFileResult { path, deleted, .. } => println!("[SWARM] Delete '{}': {}", path, if *deleted { "OK" } else { "FAILED (not found?)" }),
         ResponsePacket::MakeDirResult { path, created, .. } => println!("[SWARM] Mkdir '{}': {}", path, if *created { "OK" } else { "FAILED" }),
+        ResponsePacket::UserListResult { agents, .. } => {
+            if agents.is_empty() {
+                println!("[SWARM] No other agents connected.");
+            } else {
+                println!("[SWARM] {} agent(s) in swarm:", agents.len());
+                for a in agents {
+                    let orch = if a.is_orchestrator { " [ORCHESTRATOR]" } else { "" };
+                    let role = a.role.as_deref().unwrap_or("-");
+                    println!("  {:<20} role: {:<12}{}", a.username, role, orch);
+                }
+            }
+        }
     }
 }
 
@@ -525,6 +538,7 @@ fn parse_command(line: &str, username: &str) -> Option<Packet> {
             Some(Packet::CreateChannel(packet::CreateChannelPayload { name, created_by: username.to_string(), description: desc, visibility: Some(if is_private { "private".into() } else { "public".into() }) }))
         }
         "channels" | "list-channels" => Some(Packet::ListChannels(packet::ListChannelsPayload { requester: username.to_string() })),
+        "users" | "who" => Some(Packet::ListUsers(packet::ListUsersPayload { requester: username.to_string() })),
         "join" => { let name = rest.trim(); if name.is_empty() { return None; } Some(Packet::JoinChannel(packet::JoinChannelPayload { channel_name: name.to_string(), username: username.to_string() })) }
         "leave" => { let name = rest.trim(); if name.is_empty() { return None; } Some(Packet::LeaveChannel(packet::LeaveChannelPayload { channel_name: name.to_string(), username: username.to_string() })) }
         "delete-channel" => { let name = rest.trim(); if name.is_empty() { return None; } Some(Packet::DeleteChannel(packet::DeleteChannelPayload { channel_name: name.to_string(), requested_by: username.to_string() })) }
@@ -642,7 +656,9 @@ fn list_local_dir(path: &str, recursive: bool) -> anyhow::Result<Vec<packet::Dir
 
 fn print_help() {
     println!("Swarm Client Commands:");
-    println!("  Swarm Channels (self-contained encrypted chat):");
+    println!("  Swarm:");
+    println!("  users | who                         List all agents in the swarm");
+    println!("  Swarm Channels:");
     println!("  channel <name> [desc] [--private]  Create a channel");
     println!("  channels                            List visible channels");
     println!("  join <name>                         Join a channel");
