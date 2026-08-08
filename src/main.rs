@@ -7,6 +7,7 @@ mod protocol;
 mod server;
 mod swarm;
 mod task;
+mod tools;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;

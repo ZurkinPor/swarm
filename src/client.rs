@@ -567,11 +567,13 @@ fn handle_p2p_request(
         }
         Packet::ToolCall(payload) => {
             if payload.target == our_username {
+                let (success, output) = crate::tools::execute_tool(&payload.tool_name, &payload.arguments);
+                eprintln!("[TOOL] {} from {} → {} ({})", payload.tool_name, payload.requester, if success { "OK" } else { "FAIL" }, output.chars().take(80).collect::<String>());
                 Some(ResponsePacket::ToolCallResult {
                     requester: payload.requester.clone(),
                     tool_name: payload.tool_name.clone(),
-                    success: false,
-                    output: format!("Tool '{}' not recognized on this agent.", payload.tool_name),
+                    success,
+                    output,
                 })
             } else {
                 None
