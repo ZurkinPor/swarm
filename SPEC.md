@@ -2,245 +2,258 @@
 
 ## Overview
 
-**Swarm** is a self-contained, peer-to-peer (P2P) TCP-based protocol written in Rust that enables AI agents to orchestrate, cooperate, and work together as a swarm across multiple computers. It provides messaging channels, role-based usernames, task assignment, distributed tool execution, and encrypted file transfer — all through its own packet types over a single encrypted TCP connection. No external protocols or services are used.
+**Swarm** is a self-contained, peer-to-peer TCP protocol written in Rust. It enables AI agents to orchestrate, cooperate, and work together as a swarm across multiple computers. Every capability — messaging, channels, task management, file transfer, remote command execution, directory browsing — is provided through Swarm's own binary packet types over a single AES-256-GCM encrypted TCP connection. No other protocols or services are used, wrapped, or proxied.
 
-Swarm is designed as an **all-in-one replacement** for the fragmented ecosystem of collaboration tools. Where you would normally need separate tools for chat (IRC, Discord, Slack), file transfer (FTP/FTPS, SCP, shared drives), remote command execution (SSH), and task management (Jira, Trello), Swarm provides all of these capabilities through one unified, encrypted protocol. It does **not** wrap, proxy, or depend on any of those protocols — it replaces them entirely with its own packet types (#1–#23). Every message, every file listing, every tool call, every HTTP request, and every byte of data transferred between agents is encrypted with AES-256-GCM by default, with no plaintext ever touching the wire.
+The Swarm wire format is a purpose-built binary protocol. Packet types are identified by a single byte; payloads use length-prefixed fields with raw bytes for binary data (no base64 encoding). Text fields are UTF-8. Structured data (tool arguments, notification events) is embedded as JSON within binary packets.
 
 ## Technical Details
 
 | Property | Value |
 |---|---|
 | **Language** | Rust |
-| **Transport** | TCP (server/client model) |
+| **Transport** | TCP |
 | **Default Port** | `6996` |
-| **Topology** | P2P (one node acts as server, others connect as clients) |
-| **Encryption** | AES-256 with a 64-character hex key stored in `filename.key` |
-| **Identity** | Username-based agents with roles |
+| **Topology** | Hub-and-spoke (one node acts as routing server, others connect as clients) |
+| **Encryption** | AES-256-GCM, 64-character hex key |
+| **Identity** | Username-based agents with optional roles |
+| **Wire Format** | Binary: `[type: u8][payload_len: u32 BE][payload]` |
+| **Max Frame** | 16 MiB |
 
 ## Encryption
 
-All traffic is encrypted. A 64-character hexadecimal key is read from `filename.key` at startup. All nodes must share the same key to join the swarm.
+All traffic is encrypted with AES-256-GCM. A 64-character hexadecimal key is read from `swarm.key` at startup. Every node must share the same key. There is no plaintext on the wire — even the first byte of every frame is encrypted.
 
 ## Architecture
 
 ### Launch Modes
 
-A node can be launched in one of two modes, determined by the user's prompt:
-
-- **Server mode** — Listens on `0.0.0.0:6996` (or a user-specified port). Other agents connect to it.
-- **Client mode** — Connects to a server at a user-specified IP (and optional port, if not the default).
+- **Server mode** (`serve`) — Listens on `0.0.0.0:6996`. Routes packets between connected agents, broadcasts notifications, enforces orchestrator rules, queues offline messages.
+- **Client mode** (`connect`) — Connects to a server. Provides an interactive prompt (`swarm>`) or pipe mode (`--pipe`) for JSON stdin/stdout control by AI harnesses.
 
 ### Identity & Roles
 
-Each agent has:
-- A **username** that uniquely identifies it within the swarm.
-- An optional **role** (e.g., `developer`, `researcher`, `documenter`, `reviewer`) that hints at its capabilities and preferred task types.
-- The ability to self-assign or be assigned a role by the user.
+Each agent has a username (unique within the swarm) and an optional role (`developer`, `researcher`, `documenter`, `reviewer`) that hints at its capabilities and preferred task types.
 
 ### Connection Lifecycle
 
-- **Multi-client** — The server handles any number of concurrent client connections using async tasks.
-- **Heartbeat / Dead Client Detection** — The server enforces a **60-second read timeout**. If a client sends no data for 60 seconds, it is considered dead and automatically removed from the swarm with all agents notified. Clients naturally stay alive by sending any packet (messages, status updates, task operations).
+- **Multi-client** — The server handles any number of concurrent connections via async tasks.
+- **Heartbeat** — 60-second read timeout. A client that sends nothing for 60 seconds is removed and all agents are notified. Clients stay alive naturally by sending any packet (messages, status updates, task operations).
+- **Offline queue** — Messages to disconnected agents are stored and delivered on reconnect.
 
 ### Key Management
 
-- **Key file** — A 64-char hex key stored in `swarm.key` (or any path via `-k`).
-- **Direct hex key** — Pass the key directly via `-K <hex>` to avoid needing a file.
-- **Generate** — `gen-key` creates a random key; `gen-key -K <hex> -o file.key` saves a specific key.
-- **Auto-generation warning** — If no key file exists at startup, the server generates one and prints a prominent warning.
+- `-k <file>` — Read key from file (default: `swarm.key`)
+- `-K <hex>` — Pass 64-char hex key directly
+- `gen-key` — Generate a random key and save to file
+- Auto-generation warning if no key file exists at startup
 
-### Offline Message Queue
+### Pipe Mode (`--pipe`)
 
-Messages sent to an agent that is currently disconnected are **queued** in the server's mailbox. When the agent reconnects, all queued messages are delivered automatically. Messages sent to connected agents are delivered in real-time via the notification broadcast.
+For programmatic control by AI harnesses:
 
-### Pipe Mode (AI Harness Integration)
-
-Clients can run in `--pipe` mode for programmatic control by AI agent harnesses:
-
-- **Input** — JSON commands on stdin, one per line (`{"cmd":"msg","target":"buffy","body":"hello"}`)
+- **Input** — JSON commands on stdin, one per line
 - **Output** — JSON events on stdout (`{"type":"event","data":{...}}`)
-- **Stderr** — Connection logs and errors (keeps stdout pure JSON)
-- **Ready signal** — `{"type":"ready","username":"..."}` sent on connect
+- **Stderr** — Connection logs and errors
+- **Ready signal** — `{"type":"ready","username":"...","orchestrator":false}` on connect
 
-### Tool Execution System
+---
 
-Swarm includes a **37-tool registry** covering file operations, shell commands, HTTP, system introspection, and AI orchestration:
+## Binary Wire Format
 
-| Range | Count | Category |
+Every packet (after AES-256-GCM decryption):
+
+```
+Byte 0:       packet_type (u8)
+Bytes 1-4:    payload_length (u32, big-endian)
+Bytes 5..:    payload (type-specific binary fields)
+```
+
+### Payload primitives
+
+| Primitive | Encoding | Used for |
 |---|---|---|
-| `0x01`–`0x07` | 7 | Core file ops (write, read, run_command, list_dir, create_dir, delete_file, file_exists) |
-| `0x08`–`0x0F` | 8 | Extended (list_drives, http_get, copy_file, move_file, file_size, env_var, sleep, whoami) |
-| `0x80`–`0x93` | 20 | AI assistant (spawn_agents, read_files, str_replace, browser_use, code_reviewer, thinker, glob, etc.) |
-| `0x83` | 1 | write_todos (structured TODO.md generation) |
+| `flag` | u8, 0 or 1 | Booleans |
+| `u8` | 1 byte | Short lengths, enum values |
+| `u16` | 2 bytes BE | Medium lengths |
+| `u32` | 4 bytes BE | Long lengths, raw data sizes |
+| `u64` | 8 bytes BE | File size limits |
+| `str8` | u8 len + UTF-8 bytes | Short strings (< 256 bytes) |
+| `str16` | u16 len + UTF-8 bytes | Medium strings (paths, messages) |
+| `opt_str16` | flag + str16 | Optional strings |
+| `bytes` | u32 len + raw bytes | File content, binary blobs |
+| `json` | u32 len + UTF-8 JSON | Tool arguments, notification events |
+| `uuid` | 16 raw bytes | Task IDs, channel IDs |
 
-Tools can be invoked via JSON `TOOL_CALL` packets or compact binary format (magic byte `0x01`). The `run_command` tool enforces a real timeout (polls child process, kills on expiry). The `env_var` tool caps output at 200 entries to prevent explosion.
+### Design principles
 
-### Shared Workspace
-
-Swarm supports two workspace modes:
-
-1. **Git mode (default)** — Each agent has the same GitHub project cloned locally on its own machine. All agents work independently on their local copies, communicating changes and coordinating via the swarm. This is the recommended setup for most development workflows.
-
-2. **Single-host mode (non-Git)** — The project lives as a plain folder on one agent's computer — no Git required. Other agents issue tool calls, Swarm file transfers, file listings, and HTTP requests over TCP against that host agent's machine. Useful for quick collaboration, legacy projects, or any folder-based work where setting up Git isn't desired.
-
-In either mode, agents can also create local files unrelated to the project (notes, documentation, drafts, etc.) and hand them off to other agents as needed.
+- **Binary-first** — Every packet on the wire is binary. No text-based protocol layer.
+- **Raw bytes for data** — File content is transmitted as raw bytes with a u32 length prefix. No base64, no hex encoding, no escaping.
+- **JSON where needed** — Complex nested structures (tool call arguments, notification events) embed a JSON string within the binary packet. The envelope is binary; the structured data is JSON-accessible.
+- **No magic numbers** — The first byte of every Swarm packet identifies its type. There is no separate framing magic — the outer TCP frame (4-byte BE length prefix, handled by the transport layer) provides framing.
 
 ---
 
 ## Packet Types
 
-All communication uses structured packets. Each packet has a **type** field and a **payload**.
+23 packet types, each identified by a u8 type ID on the wire.
 
-| # | Packet Type | Direction | Description |
+### Connection (1–3)
+
+| # | Type | Direction | Binary payload |
 |---|---|---|---|
-| 1 | `JOIN` | Client → Server | Agent announces itself to the swarm with username, role, and capabilities. |
-| 2 | `LEAVE` | Client → Server / Broadcast | Agent disconnects from the swarm gracefully. Server broadcasts departure to remaining agents. |
-| 3 | `NOTIFY` | Server → Clients | Server notifies all agents of swarm events (join, leave, task updates, etc.). |
-| 4 | `CREATE_TASK` | Any → Server | Propose a new task with a description, priority, and optional assigned role. Server broadcasts to relevant agents. |
-| 5 | `TAKE_TASK` | Client → Server | Agent claims one or more pending tasks. Server acknowledges and broadcasts the assignment. |
-| 6 | `STATUS` | Client → Server | Agent reports its current status (idle, working on task X, progress percentage, etc.). |
-| 7 | `MESSAGE` | Any ↔ Any | Direct or channel-based text message between agents. |
-| 8 | `CREATE_CHANNEL` | Any → Server | Create a named communication channel. Agents can join/leave channels. |
-| 14 | `LIST_CHANNELS` | Client → Server | Request a list of all visible (non-hidden) channels in the swarm. |
-| 15 | `JOIN_CHANNEL` | Client → Server | Agent requests to join a channel by name. Server adds them to the member list. |
-| 16 | `LEAVE_CHANNEL` | Client → Server | Agent leaves a channel they are a member of. |
-| 17 | `DELETE_CHANNEL` | Client → Server | Delete a channel. Only the channel creator (or server) can delete. |
-| 18 | `HIDE_CHANNEL` | Client → Server | Hide a channel from the agent's visible channel list. Does not leave the channel — just hides it from view. |
-| 9 | `LIST_DRIVES` | Client → Target Agent | Request a list of mounted drives/volumes on the target agent's machine. |
-| 10 | `LIST_DIR` | Client → Target Agent | List directories and files at a given path, with optional recursive flag. |
-| 11 | `HTTP_REQUEST` | Client → Target Agent | Ask an agent to perform an HTTP request (GET/POST/PUT/DELETE/OPTIONS/etc.) to a URL, with optional payload and query string. Results are returned to the requester. |
-| 12 | `TOOL_CALL` | Client → Target Agent | Invoke a named tool on the target agent's machine with supplied arguments. Results are returned. |
-| 13 | `TASK_COMPLETE` | Client → Server | Agent notifies the swarm that a task is finished, optionally including results or artifacts. |
-| 19 | `ASSIGN_TASK` | Client → Server | Orchestrator assigns a pending task to a specific agent. Only orchestrators can send this. Non-orchestrator agents cannot `take` tasks when an orchestrator is present. |
-| 20 | `SEND_FILE` | Client → Target Agent | Upload a file to a remote agent via Swarm's encrypted file transfer (base64-encoded payload, max 10MB). Content is encrypted along with the outer frame. |
-| 21 | `RECEIVE_FILE` | Client → Target Agent | Request a file from a remote agent. The target reads the file and returns it base64-encoded in the response. |
-| 22 | `DELETE_FILE` | Client → Target Agent | Delete a file on a remote agent. First-class Swarm packet (not a tool call) — fast, encrypted file deletion. |
-| 23 | `MAKE_DIR` | Client → Target Agent | Create a directory recursively on a remote agent. First-class Swarm packet for encrypted directory creation. |
+| 1 | `JOIN` | Client → Server | `flag(orchestrator) str8(username) opt_str16(role) u8(cap_count) [str16(cap)...] opt_str16(workspace) opt_str16(project_root)` |
+| 2 | `LEAVE` | Client → Server | `str8(username) opt_str16(reason)` |
+| 3 | `NOTIFY` | Server → Clients | `u8(event: 0–10)` + event-specific fields |
 
-### Orchestrator Mode
+Notification events (type 3):
 
-When `--orchestrator` is set on any agent (server or client), the swarm enters **managed task mode**:
+| ID | Event | Extra fields |
+|---|---|---|
+| 0 | AgentJoined | `flag(orchestrator) str8(name) opt_str16(role) opt_str16(workspace) opt_str16(root)` |
+| 1 | AgentLeft | `str8(name) opt_str16(reason)` |
+| 2 | TaskCreated | `uuid(id) str16(title) opt_str16(role)` |
+| 3 | TaskAssigned | `uuid(id) str8(username)` |
+| 4 | TaskCompleted | `uuid(id) str8(user) opt_str16(result) u8(n) [str16(artifact)...]` |
+| 5 | ChannelCreated | `uuid(id) str8(name) str8(creator) str8(visibility)` |
+| 6 | ChannelJoined | `str8(channel) str8(user)` |
+| 7 | ChannelLeft | `str8(channel) str8(user)` |
+| 8 | ChannelDeleted | `str8(channel) str8(deleted_by)` |
+| 9 | StatusUpdate | `str8(user) str8(status) flag+uuid?(task) flag+u8?(pct)` |
+| 10 | MessageReceived | `str8(from) str8(to) str16(body)` |
 
-- Non-orchestrator agents **cannot `take` tasks** — they receive an error: *"An orchestrator is present — you cannot take tasks."*
-- The orchestrator can **`assign` tasks** to specific agents via `ASSIGN_TASK` (#19).
-- The orchestrator can still **self-claim** tasks via `take`.
-- When all orchestrators leave, the swarm reverts to free-for-all mode.
+### Tasks (4–6, 13, 19)
 
-When no orchestrator is present, task claiming has a **2-second grace period** after task creation. The `take` command silently skips tasks younger than 2 seconds, ensuring all agents see the `TaskCreated` broadcast before anyone claims the task — preventing accidental double-takes.
+| # | Type | Direction | Binary payload |
+|---|---|---|---|
+| 4 | `CREATE_TASK` | Any → Server | `str16(title) str16(desc) u8(priority: 0–3) opt_str16(role) opt_str16(assign_to)` |
+| 5 | `TAKE_TASK` | Client → Server | `str8(username) u8(count) [uuid(id)...]` |
+| 6 | `STATUS` | Client → Server | `str8(user) u8(status: 0–3) flag+uuid?(task) flag+u8?(pct) opt_str16(msg)` |
+| 13 | `TASK_COMPLETE` | Client → Server | `uuid(id) str8(user) opt_str16(result) u8(n) [str16(artifact)...]` |
+| 19 | `ASSIGN_TASK` | Client → Server | `str8(assigned_by) uuid(id) str8(assign_to)` |
 
-### Binary Tool Call Protocol
+### Messaging (7)
 
-Tool calls can be sent in a compact binary format instead of JSON for reduced overhead:
+| # | Type | Direction | Binary payload |
+|---|---|---|---|
+| 7 | `MESSAGE` | Any ↔ Any | `str8(from) u8(target_type: 0=direct 1=channel) str8(target) str16(body)` |
 
-```
-Byte 0:    0x01      (magic byte — marks this as binary, not JSON)
-Byte 1:    tool_id   (u8 — 0x01–0x93, see tool registry)
-Bytes 2-3: target_len (u16, big-endian)
-Bytes 4..:  target    (UTF-8)
-Next 2:    requester_len (u16, big-endian)
-Next ..:   requester   (UTF-8)
-Next 4:    args_len    (u32, big-endian)
-Next ..:   args_json   (UTF-8 JSON)
-```
+### Channels (8, 14–18)
 
-Total overhead: **12 bytes + target + requester** — substantially smaller than JSON for large tool calls. 37 tools are registered with IDs from `0x01` to `0x93`. Server detects the `0x01` magic byte after decryption and forwards to the target agent. The target executes the tool and returns a JSON response as usual.
+| # | Type | Direction | Binary payload |
+|---|---|---|---|
+| 8 | `CREATE_CHANNEL` | Any → Server | `str8(name) str8(created_by) opt_str16(desc) str8(visibility)` |
+| 14 | `LIST_CHANNELS` | Client → Server | `str8(requester)` |
+| 15 | `JOIN_CHANNEL` | Client → Server | `str8(channel) str8(username)` |
+| 16 | `LEAVE_CHANNEL` | Client → Server | `str8(channel) str8(username)` |
+| 17 | `DELETE_CHANNEL` | Client → Server | `str8(channel) str8(requested_by)` |
+| 18 | `HIDE_CHANNEL` | Client → Server | `str8(channel) str8(username)` |
 
-### Swarm File Transfer
+### Remote file system (9–10, 20–23)
 
-Swarm has its own encrypted file transfer protocol built directly into the packet layer (#20–#23). There is no separate FTP/FTPS/SFTP sub-protocol — file operations are first-class Swarm packets, encrypted with the same AES-256-GCM key as everything else:
+| # | Type | Direction | Binary payload |
+|---|---|---|---|
+| 9 | `LIST_DRIVES` | Client → Target | `str8(requester) str8(target)` |
+| 10 | `LIST_DIR` | Client → Target | `str8(requester) str8(target) str16(path) flag(recursive)` |
+| 20 | `SEND_FILE` | Client → Target | `str8(requester) str8(target) str16(path) flag(overwrite) bytes(content)` |
+| 21 | `RECEIVE_FILE` | Client → Target | `str8(requester) str8(target) str16(path) flag+u64?(max_bytes)` |
+| 22 | `DELETE_FILE` | Client → Target | `str8(requester) str8(target) str16(path)` |
+| 23 | `MAKE_DIR` | Client → Target | `str8(requester) str8(target) str16(path)` |
 
-- **SEND_FILE** — Upload a file to a remote agent. Content is base64-encoded. Max 10MB per transfer. Server forwards to target; target writes the file and returns bytes written.
-- **RECEIVE_FILE** — Request a file from a remote agent. Server forwards to target; target reads and base64-encodes, returns content.
-- **DELETE_FILE** — Delete a file on a remote agent. First-class packet with no tool call overhead.
-- **MAKE_DIR** — Create a directory recursively on a remote agent. First-class packet.
+### Remote execution (11–12)
 
-Unlike tool calls (which serialize through JSON and a generic executor), these packets are routed directly by the server with minimal overhead. All transfers are encrypted with AES-256-GCM along with the outer frame — there is no separate encryption layer or protocol negotiation.
+| # | Type | Direction | Binary payload |
+|---|---|---|---|
+| 11 | `HTTP_REQUEST` | Client → Target | `str8(req) str8(target) u8(method: 0–6) str16(url) u8(n_headers) [(str16,str16)...] opt_str16(body) u8(n_params) [(str16,str16)...]` |
+| 12 | `TOOL_CALL` | Client → Target | `str8(req) str8(target) str8(tool_name) json(arguments)` |
 
-### Packet Lifecycle Example
+### Enums
 
-1. **Client** sends `JOIN` → **Server** acknowledges and broadcasts `NOTIFY` to all others.
-2. **Agent A** sends `CREATE_TASK` → **Server** broadcasts to agents whose role matches (or to all).
-3. **Agent B** sends `TAKE_TASK` → **Server** confirms and broadcasts assignment.
-4. **Agent B** sends periodic `STATUS` updates while working.
-5. **Agent B** sends `TASK_COMPLETE` → **Server** broadcasts completion.
-
-### Channel Lifecycle Example
-
-1. **Agent A** sends `CREATE_CHANNEL` → **Server** creates the channel and adds Agent A as a member. Broadcasts `ChannelCreated`.
-2. **Agent B** sends `LIST_CHANNELS` → **Server** returns visible channels. Agent B sees the new channel.
-3. **Agent B** sends `JOIN_CHANNEL` → **Server** adds Agent B to the member list. Broadcasts `ChannelJoined`.
-4. **Agent B** sends `MESSAGE` to the channel → **Server** routes to all channel members except sender.
-5. **Agent B** sends `HIDE_CHANNEL` → **Server** hides the channel from Agent B's list. Agent B is still a member.
-6. **Agent A** sends `DELETE_CHANNEL` → **Server** removes the channel entirely. Broadcasts `ChannelDeleted`.
-
-### File Transfer Lifecycle Example
-
-1. **Agent A** sends `SEND_FILE` → **Server** forwards to **Agent B**. Agent B writes the file to disk and responds with bytes written.
-2. **Agent A** sends `RECEIVE_FILE` → **Server** forwards to **Agent B**. Agent B reads the file, base64-encodes it, and returns the content.
-3. **Agent A** sends `DELETE_FILE` → **Server** forwards to **Agent B**. Agent B deletes the file and responds with success/failure.
-4. **Agent A** sends `MAKE_DIR` → **Server** forwards to **Agent B**. Agent B creates the directory recursively and responds.
+| Enum | Values (wire: Rust) |
+|---|---|
+| TaskPriority | 0=Low, 1=Normal, 2=High, 3=Critical |
+| AgentStatus | 0=Idle, 1=Working, 2=Waiting, 3=Error |
+| HttpMethod | 0=GET, 1=POST, 2=PUT, 3=DELETE, 4=OPTIONS, 5=PATCH, 6=HEAD |
+| MessageTarget | 0=Direct, 1=Channel |
 
 ---
 
-## Feature Summary
+## Orchestrator Mode
 
-### Core Swarm Features
-- **Join / Leave** — Agents connect to and disconnect from the swarm.
-- **Notifications** — Server pushes swarm events (joins, leaves, task changes, channel events) to all connected agents.
-- **Messaging** — Direct (1-to-1) and channel-based (many-to-many) text communication.
+When `--orchestrator` is set on any agent, the swarm enters managed task mode:
 
-### Swarm Channels (Encrypted, Self-Contained)
-- **Create Channels** — Any agent can create a named channel with an optional description. No external chat service is used — channels are Swarm's own packet-driven communication groups.
-- **Join / Leave Channels** — Agents can join open channels or leave channels they're in.
-- **List Channels** — View all channels visible to the agent (hides channels the agent has hidden).
-- **Delete Channels** — The channel creator can delete their channel, removing it from the swarm.
-- **Hide Channels** — Hide a channel from your view without leaving it. Useful for muting noisy channels.
-- **Channel Messaging** — Send messages to a channel via Swarm's `MESSAGE` packet; all members receive them. This replaces the need for separate chat tools like Discord, Slack, or IRC — Swarm handles it all natively.
+- Non-orchestrator agents **cannot claim tasks** via `TAKE_TASK`. They receive an error.
+- The orchestrator can **assign tasks** to specific agents via `ASSIGN_TASK` (#19).
+- The orchestrator can still self-claim tasks.
+- When all orchestrators leave, the swarm reverts to free-for-all mode.
 
-### Task Management
-- **Create Tasks** — Any agent can propose a task with description, priority, and target role.
-- **Take Tasks** — Agents claim available tasks. A task can be taken by one or multiple agents.
-- **Status Reporting** — Agents periodically report progress (idle, busy, % complete).
-- **Completion Notification** — Agents signal when a task is done, with optional deliverable.
+When no orchestrator is present, tasks have a **2-second grace period** after creation. `TAKE_TASK` silently skips tasks younger than 2 seconds, ensuring all agents see the `TaskCreated` notification before anyone claims it.
 
-### Swarm File Transfer
-- **Send / Receive Files** — Upload and download files between agents via dedicated Swarm packets (#20–#21). No external FTP/FTPS/SFTP protocol — Swarm has its own encrypted file transfer built into the packet layer.
-- **Delete Files / Make Directories** — Remote file deletion and directory creation via Swarm packets (#22–#23).
-- **List Drives** — Enumerate mounted volumes on a remote agent's machine (#9).
-- **List Directories** — Browse directory trees on a remote agent (#10).
+---
 
-### Remote Execution
-- **Tool Calls** — Invoke any of 37 tools on a remote agent's machine via Swarm packets (#12), enabling distributed computing. No SSH or remote shell — Swarm's own `run_command` tool executes commands and returns output.
-- **HTTP Requests** — Ask a remote agent to issue HTTP calls (REST, scraping, API interaction) from its machine (#11).
+## Swarm File Transfer
 
-### Collaborative Development
-- Agents work on the same GitHub project cloned across all machines.
-- One agent can act as the "build host" while others issue tool calls to it over TCP.
-- Agents can create local scratch files (notes, docs, drafts) and share them with the swarm.
+File operations use dedicated packet types (#20–#23) for minimal overhead:
+
+- **SEND_FILE** (#20) — Uploads a file as raw bytes (no encoding). Max 10 MB. The target writes the file to disk.
+- **RECEIVE_FILE** (#21) — Requests a file from a target. The target reads the file and returns raw bytes.
+- **DELETE_FILE** (#22) — Deletes a file on a target.
+- **MAKE_DIR** (#23) — Creates a directory recursively on a target.
+
+Files are encrypted with AES-256-GCM along with the outer frame. There is no separate encryption negotiation or key exchange — the same 64-char hex key protects all traffic.
+
+---
+
+## Tool Execution System
+
+37 tools are registered in Swarm's tool registry, invoked via the `TOOL_CALL` packet (#12):
+
+| Range | Count | Category |
+|---|---|---|
+| `0x01`–`0x07` | 7 | Core: write_file, read_file, run_command, list_dir, create_dir, delete_file, file_exists |
+| `0x08`–`0x0F` | 8 | Extended: list_drives, http_get, copy_file, move_file, file_size, env_var, sleep, whoami |
+| `0x83` | 1 | write_todos |
+| `0x80`–`0x93` | 20 | AI assistant: spawn_agents, read_files, str_replace, browser_use, code_reviewer, thinker, glob, etc. |
+
+The `run_command` tool enforces a real timeout (polls child process, kills on expiry). The `env_var` tool caps output at 200 entries.
+
+---
+
+## System Tools
+
+| ID | Name | Args | Description |
+|---|---|---|---|
+| `0x01` | `write_file` | `path`, `content` | Create or overwrite a file |
+| `0x02` | `read_file` | `path`, `max_bytes?` | Read a file (capped at 1 MB) |
+| `0x03` | `run_command` | `command`, `cwd?`, `timeout?` | Execute a shell command |
+| `0x04` | `list_dir` | `path`, `recursive?` | List directory contents |
+| `0x05` | `create_dir` | `path` | Create directories recursively |
+| `0x06` | `delete_file` | `path` | Delete a file |
+| `0x07` | `file_exists` | `path` | Check if a path exists |
+| `0x08` | `list_drives` | — | List mounted drives/volumes |
+| `0x09` | `http_get` | `url`, `timeout?` | HTTP GET request |
+| `0x0A` | `copy_file` | `src`, `dst` | Copy a file |
+| `0x0B` | `move_file` | `src`, `dst` | Move or rename a file |
+| `0x0C` | `file_size` | `path` | Get file size |
+| `0x0D` | `env_var` | `name?` | Get env variable (or list all) |
+| `0x0E` | `sleep` | `ms` (max 60000) | Pause for N milliseconds |
+| `0x0F` | `whoami` | — | Return hostname and username |
 
 ---
 
 ## Security Model
 
-1. **Encryption** — All TCP traffic is encrypted using the shared 64-char hex key from `filename.key`.
-2. **Private by default** — The swarm is not discoverable; only agents with the key and IP/port can connect.
-3. **No built-in authentication beyond the shared key** — Trust is based on possession of the key file.
-4. **Remote execution is powerful and dangerous** — `TOOL_CALL` and `HTTP_REQUEST` allow arbitrary code/network access on a remote machine. Only trusted agents should be in the swarm.
-
----
-
-### Messaging
-- **Offline Queue** — Messages to disconnected agents are stored and delivered on reconnect.
-- **Heartbeat** — 60-second read timeout detects and removes dead clients automatically.
-- **Pipe Mode** — JSON stdin/stdout for programmatic AI harness control (`--pipe` flag).
+1. AES-256-GCM on every frame — no plaintext ever touches the wire.
+2. Private by default — not discoverable without the key and server IP/port.
+3. Trust is based on possession of the shared key file.
+4. Remote execution is powerful — `TOOL_CALL` and `run_command` can execute arbitrary code on a remote machine. Only trusted agents should join the swarm.
 
 ---
 
 ## Future Considerations
 
-- **Streaming** — Persistent TCP stream for real-time log tailing or long-running command output.
-- **Agent discovery** — UDP broadcast or mDNS for LAN-based auto-discovery.
-- **Key rotation** — In-band key rotation protocol for long-running swarms.
-- **Compression** — Optional gzip/zstd compression for large payloads.
-- **Chunked file transfer** — Split large files into multiple frames for transfers exceeding the 10MB limit.
-- **Directory transfer** — Recursive send/recv for entire directory trees as a single operation.
+- Streaming — persistent stream for real-time log tailing or long-running command output
+- Agent discovery — UDP broadcast for LAN-based auto-discovery
+- Key rotation — in-band key rotation protocol
+- Compression — optional zstd compression for large payloads
+- Chunked transfer — split files exceeding 10 MB across multiple frames
+- Directory transfer — recursive send/recv for entire trees

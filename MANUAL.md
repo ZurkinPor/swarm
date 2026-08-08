@@ -1,6 +1,6 @@
 # Swarm Manual
 
-A self-contained peer-to-peer TCP protocol for AI agent orchestration — Swarm **replaces** the need for separate tools like Discord, Slack, IRC, FTP, SSH, shared drives, and task managers. Everything runs through Swarm's own encrypted packet types over a single TCP connection. No external protocols or services are used.
+A self-contained peer-to-peer TCP protocol for AI agent orchestration. Swarm provides messaging, channels, task management, file transfer, remote command execution, and directory browsing — all through its own binary packet types over a single AES-256-GCM encrypted TCP connection.
 
 ---
 
@@ -151,9 +151,9 @@ swarm> msg alice Hey, how's the login task going?
 swarm> msg #general Build failed — can anyone take a look?
 ```
 
-### Swarm Channels (Encrypted, Self-Contained)
+### Swarm Channels
 
-Swarm channels are the protocol's own encrypted communication groups — no Discord, Slack, or IRC needed. Channels are created, joined, and managed entirely through Swarm packet types.
+Named, encrypted communication groups. Channels are created, joined, and managed through Swarm's own packet types — a first-class part of the protocol, not an external service.
 
 | Command | Description |
 |---|---|
@@ -215,16 +215,16 @@ swarm> ls bob:C:/projects
   f Cargo.toml (512b)
 ```
 
-### Swarm File Transfer (Built-In, No External Protocol)
+### Swarm File Transfer
 
-Swarm has its own encrypted file transfer built directly into the packet layer. These are first-class Swarm packets (#20–#23) — no FTP, FTPS, or SFTP is used. Files are encrypted with the same AES-256-GCM key as everything else.
+First-class packet types (#20–#23) for encrypted file operations. Files are transmitted as raw bytes — no encoding overhead.
 
 | Command | Description |
 |---|---|
-| `send <t> <local> <remote>` | Upload a file via Swarm's SEND_FILE packet (max 10MB) |
-| `recv <t> <remote_path>` | Download a file via Swarm's RECEIVE_FILE packet |
-| `rm <t> <path>` | Delete a file via Swarm's DELETE_FILE packet |
-| `mkdir <t> <path>` | Create a directory via Swarm's MAKE_DIR packet (recursive) |
+| `send <t> <local> <remote>` | Upload a file (raw bytes, max 10MB) |
+| `recv <t> <remote_path>` | Download a file (raw bytes) |
+| `rm <t> <path>` | Delete a file on a remote agent |
+| `mkdir <t> <path>` | Create a directory on a remote agent (recursive) |
 
 **Examples:**
 ```
@@ -236,9 +236,9 @@ swarm> mkdir bob /home/bob/new-feature
 
 Received files are auto-saved to the current directory (stripped of their remote path).
 
-### Remote Tools (via Swarm TOOL_CALL packets)
+### Remote Tools
 
-These commands invoke tools on remote agents through Swarm's `TOOL_CALL` packet (#12). Unlike file transfer packets which are routed directly, tool calls go through Swarm's generic tool executor.
+Invoke tools on remote agents through the `TOOL_CALL` packet (#12).
 
 | Command | Description |
 |---|---|
@@ -361,38 +361,24 @@ On connect, the client emits a ready signal:
 
 ---
 
-## Binary Tool Calls
+## Binary Wire Format
 
-For performance-sensitive tool invocation, Swarm supports a compact binary wire format.
-
-### Wire Format (after AES-256-GCM decryption)
+All Swarm packets use a unified binary format on the wire:
 
 ```
-Byte 0:    0x01      (magic — marks this as a binary tool call)
-Byte 1:    tool_id   (u8 — see registry below)
-Bytes 2-3: target_len (u16, big-endian)
-Bytes 4..:  target    (UTF-8 string)
-Next 2:    requester_len (u16, big-endian)
-Next ..:   requester   (UTF-8 string)
-Next 4:    args_len    (u32, big-endian)
-Next ..:   args_json   (UTF-8 JSON string)
+Byte 0:       packet_type (u8 — see packet type table)
+Bytes 1-4:    payload_len (u32, big-endian)
+Bytes 5..:    payload (type-specific binary fields)
 ```
 
-Total overhead: **12 bytes + target + requester** — much smaller than JSON for equivalent payloads.
+Payload fields use length-prefixed encoding: `str8` (u8 + UTF-8), `str16` (u16 + UTF-8), `bytes` (u32 + raw bytes for file content), `json` (u32 + UTF-8 JSON for complex structures like tool arguments).
 
-### Usage
+### Tool call by ID
 
-**Interactive:**
 ```
-swarm> btc bob 1 {"path":"test.txt","content":"hello"}       # decimal ID
-swarm> btc bob 0x0F {}                                        # hex ID (whoami)
-swarm> tools-list                                             # see all IDs
-```
-
-**Pipe mode:**
-```json
-{"cmd":"btc","target":"bob","tool_id":1,"args":{"path":"t.txt","content":"x"}}
-{"cmd":"btc","target":"bob","tool_id":"0x0F","args":{}}
+swarm> btc bob 1 {"path":"test.txt","content":"hello"}   # decimal ID
+swarm> btc bob 0x0F {}                                    # hex ID
+swarm> tools-list                                         # list all tool IDs
 ```
 
 ---
@@ -485,7 +471,7 @@ Leader>   assign a1b2-... alice            ← delegates other tasks
 
 ## Channel System
 
-Channels are Swarm's own encrypted communication groups — a built-in replacement for chat tools like Discord, Slack, and IRC. No external chat protocol is used; channels are created, joined, and messaged entirely through Swarm packet types (#7, #8, #14–#18).
+Named, encrypted communication groups. Channels are created, joined, hidden, and deleted through Swarm's own packet types. All channel messages are encrypted with the shared AES-256-GCM key.
 
 ### Visibility
 
@@ -521,16 +507,14 @@ All channel events are broadcast to every agent:
 
 Swarm supports three types of remote operations on other agents:
 
-### 1. Swarm File Transfer Packets (server-routed)
+### 1. Swarm File Transfer Packets
 
 | Packet | Description |
 |---|---|
-| `SEND_FILE` (#20) | Upload a file to target (base64, max 10MB) |
-| `RECEIVE_FILE` (#21) | Request a file from target |
+| `SEND_FILE` (#20) | Upload raw bytes to target (max 10MB) |
+| `RECEIVE_FILE` (#21) | Request raw bytes from target |
 | `DELETE_FILE` (#22) | Delete a file on target |
 | `MAKE_DIR` (#23) | Create a directory on target |
-
-These are Swarm's own file transfer packets — no FTP/FTPS/SFTP is used. Files are encrypted with AES-256-GCM along with the outer frame.
 
 ### 2. P2P Query Packets (server-routed)
 
@@ -542,21 +526,14 @@ These are Swarm's own file transfer packets — no FTP/FTPS/SFTP is used. Files 
 
 These go through the server which forwards them to the target agent. Responses come back the same way.
 
-### 3. Tool Calls (JSON)
+### 3. Tool Calls
 
 ```
 swarm> tool bob write_file {"path":"hello.txt","content":"world"}
+swarm> btc bob 1 {"path":"test.txt","content":"binary!"}  # by tool ID
 ```
 
-The `TOOL_CALL` packet (#12) invokes a named tool on the target. Any tool in the registry (37 total) is available. No SSH or remote shell — Swarm's own `run_command` tool handles shell execution.
-
-### 4. Binary Tool Calls (Compact)
-
-```
-swarm> btc bob 1 {"path":"test.txt","content":"binary!"}
-```
-
-Same functionality as JSON tool calls, but encoded in Swarm's compact binary format with 12-byte overhead instead of full JSON serialization.
+The `TOOL_CALL` packet (#12) invokes a named tool on the target. Any tool in the registry (37 total) is available. The `btc` command is shorthand for tool calls by numeric ID.
 
 ---
 
@@ -642,7 +619,7 @@ Use `tools-list` at the interactive prompt to see the full registry, or `{"cmd":
 | Heartbeat | 60-second read timeout |
 | Offline Messages | Queued, delivered on reconnect |
 | Multi-client | Async tasks, one per connection |
-| File Transfer Max | 10 MB per file (base64-encoded in Swarm packet) |
+| File Transfer Max | 10 MB per file (raw bytes) |
 
 ### Packet Types (23 total)
 
@@ -788,7 +765,7 @@ swarm> take c3d4e5f6-...
 - 64-character hex key — possession of key = access
 - Private by default — not discoverable without key and IP
 - No built-in auth beyond the shared key
-- **Remote execution is powerful** — Swarm's own `TOOL_CALL`, `run_command`, and `http_get` can execute arbitrary code on remote machines. No SSH or remote shell is involved — commands run through Swarm packets. Only trusted agents should join the swarm.
+- **Remote execution is powerful** — `TOOL_CALL` and `run_command` can execute arbitrary code on remote machines via Swarm packets. Only trusted agents should join the swarm.
 
 ---
 
