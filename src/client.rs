@@ -2,6 +2,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use futures::StreamExt;
+use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
@@ -13,6 +14,25 @@ use crate::protocol::FrameCodec;
 
 /// Connect to a swarm server and interact.
 pub async fn run_client(
+    server_addr: SocketAddr,
+    crypto: Arc<Crypto>,
+    username: String,
+    role: Option<String>,
+    capabilities: Vec<String>,
+    workspace_mode: String,
+    project_root: Option<String>,
+    pipe_mode: bool,
+) -> anyhow::Result<()> {
+    if pipe_mode {
+        run_pipe_mode(server_addr, crypto, username, role, capabilities, workspace_mode, project_root).await
+    } else {
+        run_interactive(server_addr, crypto, username, role, capabilities, workspace_mode, project_root).await
+    }
+}
+
+// ── Interactive mode ──
+
+async fn run_interactive(
     server_addr: SocketAddr,
     crypto: Arc<Crypto>,
     username: String,
@@ -43,7 +63,6 @@ pub async fn run_client(
     });
     send_packet(&writer, &crypto, &join_packet).await?;
 
-    // Spawn a task to read incoming packets (notifications, responses, P2P requests)
     let writer_p2p = writer.clone();
     let writer_clone = writer.clone();
     let crypto_read = crypto.clone();
@@ -67,18 +86,12 @@ pub async fn run_client(
                     continue;
                 }
             };
-            // Try to parse as a response first
             if let Ok(response) = serde_json::from_slice::<ResponsePacket>(&decrypted) {
                 handle_response(&response);
                 continue;
             }
-            // Try to parse as a Packet (notification or P2P request)
             if let Ok(packet) = serde_json::from_slice::<Packet>(&decrypted) {
-                // Check if it's a P2P request directed at us
-                if let Some(response) =
-                    handle_p2p_request(&packet, &username_read)
-                {
-                    // Send response back via the writer
+                if let Some(response) = handle_p2p_request(&packet, &username_read) {
                     let payload = serde_json::to_vec(&response).unwrap();
                     if let Ok(encrypted) = crypto_read.encrypt(&payload) {
                         let mut w = writer_p2p.lock().await;
@@ -100,7 +113,6 @@ pub async fn run_client(
         println!("[CLIENT] Read loop ended");
     });
 
-    // Interactive CLI prompt loop
     println!("[CLIENT] Type 'help' for commands, 'quit' to leave.");
     let stdin = tokio::io::stdin();
     let mut buf = String::new();
@@ -135,7 +147,6 @@ pub async fn run_client(
         }
     }
 
-    // Send LEAVE
     let leave_packet = Packet::Leave(packet::LeavePayload {
         username: username.clone(),
         reason: Some("User exited".into()),
@@ -146,6 +157,313 @@ pub async fn run_client(
     println!("[CLIENT] Disconnected from swarm.");
     Ok(())
 }
+
+// ── Pipe mode (JSON stdin/stdout for AI harnesses) ──
+
+async fn run_pipe_mode(
+    server_addr: SocketAddr,
+    crypto: Arc<Crypto>,
+    username: String,
+    role: Option<String>,
+    capabilities: Vec<String>,
+    workspace_mode: String,
+    project_root: Option<String>,
+) -> anyhow::Result<()> {
+    eprintln!("[PIPE] Connecting to {} as '{}'", server_addr, username);
+
+    let stream = TcpStream::connect(server_addr).await?;
+    eprintln!("[PIPE] Connected");
+
+    let (reader, writer) = stream.into_split();
+    let writer = Arc::new(Mutex::new(writer));
+    let mut framed = FramedRead::new(reader, FrameCodec);
+
+    // Send JOIN
+    let join_packet = Packet::Join(packet::JoinPayload {
+        username: username.clone(),
+        role: role.clone(),
+        capabilities,
+        workspace_mode: Some(workspace_mode),
+        project_root,
+    });
+    send_packet(&writer, &crypto, &join_packet).await?;
+
+    // Channel for the read task to send events to the main loop
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel::<serde_json::Value>();
+
+    let writer_p2p = writer.clone();
+    let crypto_read = crypto.clone();
+    let username_read = username.clone();
+
+    // Spawn read task — forwards incoming packets as JSON events
+    let _read_handle = tokio::spawn(async move {
+        while let Some(frame_result) = framed.next().await {
+            let encrypted = match frame_result {
+                Ok(f) => f,
+                Err(_) => break,
+            };
+            let decrypted = match crypto_read.decrypt(&encrypted) {
+                Ok(d) => d,
+                Err(_) => continue,
+            };
+            if let Ok(response) = serde_json::from_slice::<ResponsePacket>(&decrypted) {
+                let json = serde_json::to_value(&response).unwrap();
+                let _ = event_tx.send(json!({"type":"response","data":json}));
+                continue;
+            }
+            if let Ok(packet) = serde_json::from_slice::<Packet>(&decrypted) {
+                if let Some(response) = handle_p2p_request(&packet, &username_read) {
+                    let payload = serde_json::to_vec(&response).unwrap();
+                    if let Ok(encrypted) = crypto_read.encrypt(&payload) {
+                        let mut w = writer_p2p.lock().await;
+                        let len = encrypted.len() as u32;
+                        let _ = w.write_all(&len.to_be_bytes()).await;
+                        let _ = w.write_all(&encrypted).await;
+                        let _ = w.flush().await;
+                    }
+                    continue;
+                }
+                let json = serde_json::to_value(&packet).unwrap();
+                let _ = event_tx.send(json!({"type":"event","data":json}));
+                continue;
+            }
+        }
+    });
+
+    // Signal ready
+    let ready = json!({"type":"ready","username":username});
+    println!("{}", serde_json::to_string(&ready).unwrap());
+
+    // Read JSON commands from stdin, one per line
+    let stdin = tokio::io::stdin();
+    let mut buf = String::new();
+    let mut stdin_reader = tokio::io::BufReader::new(stdin);
+
+    loop {
+        // Check for incoming events first (non-blocking)
+        while let Ok(event) = event_rx.try_recv() {
+            println!("{}", serde_json::to_string(&event).unwrap());
+        }
+
+        buf.clear();
+        let n = match stdin_reader.read_line(&mut buf).await {
+            Ok(n) => n,
+            Err(_) => break,
+        };
+        if n == 0 {
+            break;
+        }
+        let line = buf.trim();
+        if line.is_empty() {
+            continue;
+        }
+
+        // Parse JSON command
+        let cmd: Value = match serde_json::from_str(line) {
+            Ok(v) => v,
+            Err(e) => {
+                println!("{}", serde_json::to_string(&json!({"type":"error","message":format!("Invalid JSON: {}", e)})).unwrap());
+                continue;
+            }
+        };
+
+        let cmd_type = cmd["cmd"].as_str().unwrap_or("");
+
+        match cmd_type {
+            "quit" | "exit" => break,
+            _ => {
+                match json_command_to_packet(&cmd, &username) {
+                    Ok(Some(packet)) => {
+                        send_packet(&writer, &crypto, &packet).await?;
+                    }
+                    Ok(None) => {
+                        // Unknown command, ignore
+                    }
+                    Err(e) => {
+                        println!("{}", serde_json::to_string(&json!({"type":"error","message":e})).unwrap());
+                    }
+                }
+            }
+        }
+    }
+
+    // Drain remaining events
+    while let Ok(event) = event_rx.try_recv() {
+        println!("{}", serde_json::to_string(&event).unwrap());
+    }
+
+    let leave_packet = Packet::Leave(packet::LeavePayload {
+        username: username.clone(),
+        reason: Some("Pipe closed".into()),
+    });
+    send_packet(&writer, &crypto, &leave_packet).await?;
+
+    eprintln!("[PIPE] Disconnected");
+    Ok(())
+}
+
+/// Convert a JSON pipe command into a Packet. Returns Ok(None) for unknown commands.
+fn json_command_to_packet(cmd: &Value, username: &str) -> Result<Option<Packet>, String> {
+    let cmd_type = cmd["cmd"].as_str().unwrap_or("");
+    match cmd_type {
+        "msg" | "message" => {
+            let target = cmd["target"].as_str().ok_or("'target' required")?;
+            let body = cmd["body"].as_str().unwrap_or("");
+            let to = if let Some(channel) = target.strip_prefix('#') {
+                packet::MessageTarget::Channel { channel: channel.to_string() }
+            } else {
+                packet::MessageTarget::Direct { username: target.to_string() }
+            };
+            Ok(Some(Packet::Message(packet::MessagePayload {
+                from: username.to_string(),
+                to,
+                body: body.to_string(),
+            })))
+        }
+        "task" => {
+            let title = cmd["title"].as_str().ok_or("'title' required")?;
+            let description = cmd["description"].as_str().unwrap_or("").to_string();
+            let priority = match cmd["priority"].as_str().unwrap_or("normal") {
+                "low" => packet::TaskPriority::Low,
+                "high" => packet::TaskPriority::High,
+                "critical" => packet::TaskPriority::Critical,
+                _ => packet::TaskPriority::Normal,
+            };
+            let assigned_role = cmd["role"].as_str().map(|s| s.to_string());
+            Ok(Some(Packet::CreateTask(packet::CreateTaskPayload {
+                title: title.to_string(),
+                description,
+                priority,
+                assigned_role,
+                assign_to: None,
+            })))
+        }
+        "take" => {
+            let task_id = cmd["task_id"].as_str().ok_or("'task_id' required")?;
+            let id = uuid::Uuid::parse_str(task_id).map_err(|e| e.to_string())?;
+            Ok(Some(Packet::TakeTask(packet::TakeTaskPayload {
+                task_ids: vec![id],
+                username: username.to_string(),
+            })))
+        }
+        "done" => {
+            let task_id = cmd["task_id"].as_str().ok_or("'task_id' required")?;
+            let id = uuid::Uuid::parse_str(task_id).map_err(|e| e.to_string())?;
+            Ok(Some(Packet::TaskComplete(packet::TaskCompletePayload {
+                task_id: id,
+                username: username.to_string(),
+                result: cmd["result"].as_str().map(|s| s.to_string()),
+                artifacts: vec![],
+            })))
+        }
+        "status" => {
+            let msg = cmd["message"].as_str().unwrap_or("").to_string();
+            Ok(Some(Packet::Status(packet::StatusPayload {
+                username: username.to_string(),
+                status: packet::AgentStatus::Working,
+                task_id: None,
+                progress_pct: None,
+                message: Some(msg),
+            })))
+        }
+        "channel" => {
+            let name = cmd["name"].as_str().ok_or("'name' required")?;
+            let description = cmd["description"].as_str().map(|s| s.to_string());
+            let is_private = cmd["private"].as_bool().unwrap_or(false);
+            Ok(Some(Packet::CreateChannel(packet::CreateChannelPayload {
+                name: name.to_string(),
+                created_by: username.to_string(),
+                description,
+                visibility: Some(if is_private { "private".into() } else { "public".into() }),
+            })))
+        }
+        "channels" => {
+            Ok(Some(Packet::ListChannels(packet::ListChannelsPayload {
+                requester: username.to_string(),
+            })))
+        }
+        "join" => {
+            let name = cmd["name"].as_str().ok_or("'name' required")?;
+            Ok(Some(Packet::JoinChannel(packet::JoinChannelPayload {
+                channel_name: name.to_string(),
+                username: username.to_string(),
+            })))
+        }
+        "leave" => {
+            let name = cmd["name"].as_str().ok_or("'name' required")?;
+            Ok(Some(Packet::LeaveChannel(packet::LeaveChannelPayload {
+                channel_name: name.to_string(),
+                username: username.to_string(),
+            })))
+        }
+        "delete-channel" => {
+            let name = cmd["name"].as_str().ok_or("'name' required")?;
+            Ok(Some(Packet::DeleteChannel(packet::DeleteChannelPayload {
+                channel_name: name.to_string(),
+                requested_by: username.to_string(),
+            })))
+        }
+        "hide" => {
+            let name = cmd["name"].as_str().ok_or("'name' required")?;
+            Ok(Some(Packet::HideChannel(packet::HideChannelPayload {
+                channel_name: name.to_string(),
+                username: username.to_string(),
+            })))
+        }
+        "drives" => {
+            let target = cmd["target"].as_str().ok_or("'target' required")?;
+            Ok(Some(Packet::ListDrives(packet::ListDrivesPayload {
+                requester: username.to_string(),
+                target: target.to_string(),
+            })))
+        }
+        "ls" | "dir" => {
+            let target = cmd["target"].as_str().ok_or("'target' required")?;
+            let path = cmd["path"].as_str().unwrap_or(".");
+            Ok(Some(Packet::ListDir(packet::ListDirPayload {
+                requester: username.to_string(),
+                target: target.to_string(),
+                path: path.to_string(),
+                recursive: false,
+            })))
+        }
+        "http" => {
+            let target = cmd["target"].as_str().ok_or("'target' required")?;
+            let method_str = cmd["method"].as_str().unwrap_or("GET");
+            let url = cmd["url"].as_str().ok_or("'url' required")?;
+            let method = match method_str.to_uppercase().as_str() {
+                "GET" => packet::HttpMethod::GET,
+                "POST" => packet::HttpMethod::POST,
+                "PUT" => packet::HttpMethod::PUT,
+                "DELETE" => packet::HttpMethod::DELETE,
+                _ => return Err(format!("Unknown method: {}", method_str)),
+            };
+            Ok(Some(Packet::HttpRequest(packet::HttpRequestPayload {
+                requester: username.to_string(),
+                target: target.to_string(),
+                method,
+                url: url.to_string(),
+                headers: vec![],
+                body: cmd["body"].as_str().map(|s| s.to_string()),
+                query_params: vec![],
+            })))
+        }
+        "tool" => {
+            let target = cmd["target"].as_str().ok_or("'target' required")?;
+            let tool_name = cmd["tool_name"].as_str().ok_or("'tool_name' required")?;
+            let arguments = cmd.get("args").cloned().unwrap_or(serde_json::Value::Object(Default::default()));
+            Ok(Some(Packet::ToolCall(packet::ToolCallPayload {
+                requester: username.to_string(),
+                target: target.to_string(),
+                tool_name: tool_name.to_string(),
+                arguments,
+            })))
+        }
+        _ => Ok(None),
+    }
+}
+
+// ── Shared helpers ──
 
 async fn send_packet(
     writer: &Mutex<impl AsyncWriteExt + Unpin>,
@@ -162,8 +480,6 @@ async fn send_packet(
     Ok(())
 }
 
-/// Handle a P2P request forwarded from the server. Returns a ResponsePacket
-/// if this is a P2P request directed at us.
 fn handle_p2p_request(
     packet: &Packet,
     our_username: &str,
@@ -171,10 +487,9 @@ fn handle_p2p_request(
     match packet {
         Packet::ListDrives(payload) => {
             if payload.target == our_username {
-                let drives = list_local_drives();
                 Some(ResponsePacket::ListDrivesResult {
                     requester: payload.requester.clone(),
-                    drives,
+                    drives: list_local_drives(),
                 })
             } else {
                 None
@@ -203,7 +518,7 @@ fn handle_p2p_request(
                     requester: payload.requester.clone(),
                     status_code: 501,
                     headers: vec![],
-                    body: "HTTP forwarding from client not yet implemented".into(),
+                    body: "HTTP forwarding not yet implemented".into(),
                 })
             } else {
                 None
@@ -215,10 +530,7 @@ fn handle_p2p_request(
                     requester: payload.requester.clone(),
                     tool_name: payload.tool_name.clone(),
                     success: false,
-                    output: format!(
-                        "Tool '{}' not recognized on this agent.",
-                        payload.tool_name
-                    ),
+                    output: format!("Tool '{}' not recognized on this agent.", payload.tool_name),
                 })
             } else {
                 None
@@ -240,11 +552,7 @@ fn handle_response(resp: &ResponsePacket) {
                 println!("  {} {} ({} bytes)", kind, entry.name, entry.size_bytes);
             }
         }
-        ResponsePacket::HttpRequestResult {
-            status_code,
-            body,
-            ..
-        } => {
+        ResponsePacket::HttpRequestResult { status_code, body, .. } => {
             println!("[HTTP] Status: {}", status_code);
             let preview: String = body.chars().take(500).collect();
             println!("[HTTP] Body: {}", preview);
@@ -252,12 +560,7 @@ fn handle_response(resp: &ResponsePacket) {
                 println!("... ({} more chars)", body.len() - 500);
             }
         }
-        ResponsePacket::ToolCallResult {
-            tool_name,
-            success,
-            output,
-            ..
-        } => {
+        ResponsePacket::ToolCallResult { tool_name, success, output, .. } => {
             let status = if *success { "OK" } else { "FAILED" };
             println!("[TOOL:{}] {}: {}", tool_name, status, output);
         }
@@ -267,10 +570,7 @@ fn handle_response(resp: &ResponsePacket) {
             } else {
                 println!("[CHANNELS]");
                 for ch in channels {
-                    println!(
-                        "  #{} ({} members, {} by {})",
-                        ch.name, ch.member_count, ch.visibility, ch.created_by
-                    );
+                    println!("  #{} ({} members, {} by {})", ch.name, ch.member_count, ch.visibility, ch.created_by);
                     if let Some(desc) = &ch.description {
                         if !desc.is_empty() {
                             println!("    {}", desc);
@@ -288,98 +588,39 @@ fn handle_response(resp: &ResponsePacket) {
 fn handle_incoming_packet(packet: &Packet, our_username: &str) {
     match packet {
         Packet::Notify(n) => match n {
-            packet::NotifyPayload::AgentJoined {
-                username,
-                role,
-                workspace_mode,
-                project_root,
-            } => {
+            packet::NotifyPayload::AgentJoined { username, role, workspace_mode, project_root } => {
                 let mode_str = workspace_mode.as_deref().unwrap_or("git");
-                let root_str = project_root
-                    .as_ref()
-                    .map(|r| format!(" root={}", r))
-                    .unwrap_or_default();
-                println!(
-                    "[SWARM] Agent '{}' joined (role: {:?}, workspace: {}{})",
-                    username, role, mode_str, root_str
-                );
+                let root_str = project_root.as_ref().map(|r| format!(" root={}", r)).unwrap_or_default();
+                println!("[SWARM] Agent '{}' joined (role: {:?}, workspace: {}{})", username, role, mode_str, root_str);
             }
             packet::NotifyPayload::AgentLeft { username, reason } => {
-                println!(
-                    "[SWARM] Agent '{}' left{}",
-                    username,
-                    reason
-                        .as_ref()
-                        .map(|r| format!(" ({})", r))
-                        .unwrap_or_default()
-                );
+                println!("[SWARM] Agent '{}' left{}", username, reason.as_ref().map(|r| format!(" ({})", r)).unwrap_or_default());
             }
-            packet::NotifyPayload::TaskCreated {
-                task_id,
-                title,
-                assigned_role,
-            } => {
-                println!(
-                    "[SWARM] Task created: '{}' (id: {}) role: {:?}",
-                    title, task_id, assigned_role
-                );
+            packet::NotifyPayload::TaskCreated { task_id, title, assigned_role } => {
+                println!("[SWARM] Task created: '{}' (id: {}) role: {:?}", title, task_id, assigned_role);
             }
-            packet::NotifyPayload::TaskAssigned {
-                task_id,
-                username,
-            } => {
+            packet::NotifyPayload::TaskAssigned { task_id, username } => {
                 println!("[SWARM] Task {} assigned to '{}'", task_id, username);
             }
-            packet::NotifyPayload::TaskCompleted {
-                task_id,
-                username,
-                ..
-            } => {
+            packet::NotifyPayload::TaskCompleted { task_id, username, .. } => {
                 println!("[SWARM] Task {} completed by '{}'", task_id, username);
             }
-            packet::NotifyPayload::ChannelCreated {
-                name,
-                created_by,
-                visibility,
-                ..
-            } => {
-                println!(
-                    "[SWARM] Channel '{}' created by '{}' ({})",
-                    name, created_by, visibility
-                );
+            packet::NotifyPayload::ChannelCreated { name, created_by, visibility, .. } => {
+                println!("[SWARM] Channel '{}' created by '{}' ({})", name, created_by, visibility);
             }
-            packet::NotifyPayload::ChannelJoined {
-                channel_name,
-                username,
-            } => {
+            packet::NotifyPayload::ChannelJoined { channel_name, username } => {
                 println!("[SWARM] '{}' joined channel '{}'", username, channel_name);
             }
-            packet::NotifyPayload::ChannelLeft {
-                channel_name,
-                username,
-            } => {
+            packet::NotifyPayload::ChannelLeft { channel_name, username } => {
                 println!("[SWARM] '{}' left channel '{}'", username, channel_name);
             }
-            packet::NotifyPayload::ChannelDeleted {
-                channel_name,
-                deleted_by,
-            } => {
-                println!(
-                    "[SWARM] Channel '{}' deleted by '{}'",
-                    channel_name, deleted_by
-                );
+            packet::NotifyPayload::ChannelDeleted { channel_name, deleted_by } => {
+                println!("[SWARM] Channel '{}' deleted by '{}'", channel_name, deleted_by);
             }
-            packet::NotifyPayload::StatusUpdate {
-                username,
-                status,
-                task_id,
-                progress_pct,
-            } => {
+            packet::NotifyPayload::StatusUpdate { username, status, task_id, progress_pct } => {
                 let extra = if let (Some(tid), Some(pct)) = (task_id, progress_pct) {
                     format!(" on task {} ({}%)", tid, pct)
-                } else {
-                    String::new()
-                };
+                } else { String::new() };
                 println!("[SWARM] Agent '{}' is {}{}", username, status, extra);
             }
             packet::NotifyPayload::MessageReceived { from, to, body } => {
@@ -391,9 +632,7 @@ fn handle_incoming_packet(packet: &Packet, our_username: &str) {
         Packet::Message(msg) => {
             println!("[MSG] {}: {}", msg.from, msg.body);
         }
-        _ => {
-            // P2P requests are handled separately
-        }
+        _ => {}
     }
 }
 
@@ -407,21 +646,12 @@ fn parse_command(line: &str, username: &str) -> Option<Packet> {
             let mut sub = rest.splitn(2, ' ');
             let target = sub.next()?;
             let body = sub.next().unwrap_or("");
-            // #prefix means channel, otherwise direct
             let to = if let Some(channel) = target.strip_prefix('#') {
-                packet::MessageTarget::Channel {
-                    channel: channel.to_string(),
-                }
+                packet::MessageTarget::Channel { channel: channel.to_string() }
             } else {
-                packet::MessageTarget::Direct {
-                    username: target.to_string(),
-                }
+                packet::MessageTarget::Direct { username: target.to_string() }
             };
-            Some(Packet::Message(packet::MessagePayload {
-                from: username.to_string(),
-                to,
-                body: body.to_string(),
-            }))
+            Some(Packet::Message(packet::MessagePayload { from: username.to_string(), to, body: body.to_string() }))
         }
         "task" => {
             let mut role = None;
@@ -430,125 +660,64 @@ fn parse_command(line: &str, username: &str) -> Option<Packet> {
                 role = Some(rest[idx + 5..].trim().to_string());
                 title = rest[..idx].trim().to_string();
             }
-            Some(Packet::CreateTask(packet::CreateTaskPayload {
-                title,
-                description: String::new(),
-                priority: packet::TaskPriority::Normal,
-                assigned_role: role,
-                assign_to: None,
-            }))
+            Some(Packet::CreateTask(packet::CreateTaskPayload { title, description: String::new(), priority: packet::TaskPriority::Normal, assigned_role: role, assign_to: None }))
         }
         "take" => {
             let task_id = uuid::Uuid::parse_str(rest.trim()).ok()?;
-            Some(Packet::TakeTask(packet::TakeTaskPayload {
-                task_ids: vec![task_id],
-                username: username.to_string(),
-            }))
+            Some(Packet::TakeTask(packet::TakeTaskPayload { task_ids: vec![task_id], username: username.to_string() }))
         }
         "done" => {
             let task_id = uuid::Uuid::parse_str(rest.trim()).ok()?;
-            Some(Packet::TaskComplete(packet::TaskCompletePayload {
-                task_id,
-                username: username.to_string(),
-                result: None,
-                artifacts: vec![],
-            }))
+            Some(Packet::TaskComplete(packet::TaskCompletePayload { task_id, username: username.to_string(), result: None, artifacts: vec![] }))
         }
         "status" => {
-            Some(Packet::Status(packet::StatusPayload {
-                username: username.to_string(),
-                status: packet::AgentStatus::Working,
-                task_id: None,
-                progress_pct: None,
-                message: Some(rest.to_string()),
-            }))
+            Some(Packet::Status(packet::StatusPayload { username: username.to_string(), status: packet::AgentStatus::Working, task_id: None, progress_pct: None, message: Some(rest.to_string()) }))
         }
         "channel" => {
-            // channel <name> [description] [--private]
             let is_private = rest.contains("--private");
             let clean = rest.replace("--private", "").trim().to_string();
             let mut sub = clean.splitn(2, ' ');
             let name = sub.next().unwrap_or("").trim().to_string();
             let desc = sub.next().map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
-            if name.is_empty() {
-                return None;
-            }
+            if name.is_empty() { return None; }
             Some(Packet::CreateChannel(packet::CreateChannelPayload {
-                name,
-                created_by: username.to_string(),
-                description: desc,
-                visibility: if is_private {
-                    Some("private".into())
-                } else {
-                    Some("public".into())
-                },
+                name, created_by: username.to_string(), description: desc,
+                visibility: Some(if is_private { "private".into() } else { "public".into() }),
             }))
         }
         "channels" | "list-channels" => {
-            Some(Packet::ListChannels(packet::ListChannelsPayload {
-                requester: username.to_string(),
-            }))
+            Some(Packet::ListChannels(packet::ListChannelsPayload { requester: username.to_string() }))
         }
         "join" => {
             let name = rest.trim();
-            if name.is_empty() {
-                return None;
-            }
-            Some(Packet::JoinChannel(packet::JoinChannelPayload {
-                channel_name: name.to_string(),
-                username: username.to_string(),
-            }))
+            if name.is_empty() { return None; }
+            Some(Packet::JoinChannel(packet::JoinChannelPayload { channel_name: name.to_string(), username: username.to_string() }))
         }
         "leave" => {
             let name = rest.trim();
-            if name.is_empty() {
-                return None;
-            }
-            Some(Packet::LeaveChannel(packet::LeaveChannelPayload {
-                channel_name: name.to_string(),
-                username: username.to_string(),
-            }))
+            if name.is_empty() { return None; }
+            Some(Packet::LeaveChannel(packet::LeaveChannelPayload { channel_name: name.to_string(), username: username.to_string() }))
         }
         "delete-channel" => {
             let name = rest.trim();
-            if name.is_empty() {
-                return None;
-            }
-            Some(Packet::DeleteChannel(packet::DeleteChannelPayload {
-                channel_name: name.to_string(),
-                requested_by: username.to_string(),
-            }))
+            if name.is_empty() { return None; }
+            Some(Packet::DeleteChannel(packet::DeleteChannelPayload { channel_name: name.to_string(), requested_by: username.to_string() }))
         }
         "hide" => {
             let name = rest.trim();
-            if name.is_empty() {
-                return None;
-            }
-            Some(Packet::HideChannel(packet::HideChannelPayload {
-                channel_name: name.to_string(),
-                username: username.to_string(),
-            }))
+            if name.is_empty() { return None; }
+            Some(Packet::HideChannel(packet::HideChannelPayload { channel_name: name.to_string(), username: username.to_string() }))
         }
         "drives" => {
             let target = rest.trim();
-            if target.is_empty() {
-                return None;
-            }
-            Some(Packet::ListDrives(packet::ListDrivesPayload {
-                requester: username.to_string(),
-                target: target.to_string(),
-            }))
+            if target.is_empty() { return None; }
+            Some(Packet::ListDrives(packet::ListDrivesPayload { requester: username.to_string(), target: target.to_string() }))
         }
         "ls" | "dir" => {
             let mut sub = rest.splitn(2, ':');
             let target = sub.next()?;
             let path = sub.next().unwrap_or(".");
-            Some(Packet::ListDir(packet::ListDirPayload {
-                requester: username.to_string(),
-                target: target.to_string(),
-                path: path.to_string(),
-                recursive: false,
-            }))
+            Some(Packet::ListDir(packet::ListDirPayload { requester: username.to_string(), target: target.to_string(), path: path.to_string(), recursive: false }))
         }
         "http" => {
             let mut sub = rest.splitn(3, ' ');
@@ -562,15 +731,7 @@ fn parse_command(line: &str, username: &str) -> Option<Packet> {
                 "DELETE" => packet::HttpMethod::DELETE,
                 _ => return None,
             };
-            Some(Packet::HttpRequest(packet::HttpRequestPayload {
-                requester: username.to_string(),
-                target: target.to_string(),
-                method,
-                url: url.to_string(),
-                headers: vec![],
-                body: None,
-                query_params: vec![],
-            }))
+            Some(Packet::HttpRequest(packet::HttpRequestPayload { requester: username.to_string(), target: target.to_string(), method, url: url.to_string(), headers: vec![], body: None, query_params: vec![] }))
         }
         "tool" => {
             let mut sub = rest.splitn(3, ' ');
@@ -578,25 +739,15 @@ fn parse_command(line: &str, username: &str) -> Option<Packet> {
             let tool_name = sub.next()?;
             let args_str = sub.next().unwrap_or("{}");
             let arguments: serde_json::Value = serde_json::from_str(args_str).ok()?;
-            Some(Packet::ToolCall(packet::ToolCallPayload {
-                requester: username.to_string(),
-                target: target.to_string(),
-                tool_name: tool_name.to_string(),
-                arguments,
-            }))
+            Some(Packet::ToolCall(packet::ToolCallPayload { requester: username.to_string(), target: target.to_string(), tool_name: tool_name.to_string(), arguments }))
         }
         _ => None,
     }
 }
 
-// ── Local system helpers ──
-
 fn list_local_drives() -> Vec<String> {
     if cfg!(windows) {
-        ('A'..='Z')
-            .map(|c| format!("{}:\\", c))
-            .filter(|d| std::path::Path::new(d).exists())
-            .collect()
+        ('A'..='Z').map(|c| format!("{}:\\", c)).filter(|d| std::path::Path::new(d).exists()).collect()
     } else {
         vec!["/".to_string()]
     }
@@ -610,24 +761,16 @@ fn list_local_dir(path: &str, recursive: bool) -> anyhow::Result<Vec<packet::Dir
         let metadata = entry.metadata()?;
         let is_dir = metadata.is_dir();
         let entry_path = entry.path();
-        result.push(packet::DirEntry {
-            name: entry.file_name().to_string_lossy().into(),
-            is_dir,
-            size_bytes: metadata.len(),
-        });
+        result.push(packet::DirEntry { name: entry.file_name().to_string_lossy().into(), is_dir, size_bytes: metadata.len() });
         if recursive && is_dir {
             let sub_path = entry_path.to_string_lossy().to_string();
             match list_local_dir(&sub_path, true) {
                 Ok(sub_entries) => {
                     for se in sub_entries {
-                        result.push(packet::DirEntry {
-                            name: format!("{}/{}", entry.file_name().to_string_lossy(), se.name),
-                            is_dir: se.is_dir,
-                            size_bytes: se.size_bytes,
-                        });
+                        result.push(packet::DirEntry { name: format!("{}/{}", entry.file_name().to_string_lossy(), se.name), is_dir: se.is_dir, size_bytes: se.size_bytes });
                     }
                 }
-                Err(_) => {} // skip inaccessible subdirs
+                Err(_) => {}
             }
         }
     }

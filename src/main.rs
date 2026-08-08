@@ -83,6 +83,10 @@ enum Commands {
         /// Project root path (required for single-host mode)
         #[arg(long)]
         project_root: Option<String>,
+
+        /// Pipe mode: JSON commands on stdin, JSON events on stdout (for AI harnesses)
+        #[arg(long)]
+        pipe: bool,
     },
     /// Generate a new random key file
     GenKey {
@@ -150,6 +154,7 @@ async fn main() -> anyhow::Result<()> {
             capabilities,
             workspace_mode,
             project_root,
+            pipe,
         } => {
             let crypto = load_key(&cli.key, &cli.key_file)?;
             let crypto = Arc::new(crypto);
@@ -174,6 +179,7 @@ async fn main() -> anyhow::Result<()> {
                 caps,
                 workspace_mode,
                 project_root,
+                pipe,
             )
             .await?;
         }
