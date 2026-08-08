@@ -11,7 +11,7 @@ A self-contained peer-to-peer TCP protocol for AI agent orchestration. Swarm pro
 3. [Key Management](#key-management)
 4. [Interactive Commands](#interactive-commands)
 5. [Pipe Mode (AI Harness)](#pipe-mode-ai-harness)
-6. [Binary Tool Calls](#binary-tool-calls)
+6. [Binary Wire Format](#binary-wire-format)
 7. [Orchestrator Mode](#orchestrator-mode)
 8. [Task Workflows](#task-workflows)
 9. [Channel System](#channel-system)
@@ -341,12 +341,15 @@ On connect, the client emits a ready signal:
 
 **Events (notifications):**
 ```json
-{"type":"event","data":{"type":"Notify","payload":{"event":"AgentJoined","username":"alice","role":"developer","workspace_mode":"git","project_root":null,"is_orchestrator":false}}}
+{"type":"event","data":{"type":"Notify","event":"AgentJoined","username":"alice","role":"developer","is_orchestrator":false}}
 ```
 
-**Binary tool calls received:**
 ```json
-{"type":"binary_tool_call","data":{"tool_id":"0x01","tool_name":"write_file","target":"ai-assistant","requester":"buffy","arguments":{"path":"test.txt","content":"hello"}}}
+{"type":"event","data":{"type":"Message","from":"bob","to":"alice","body":"Hello!"}}
+```
+
+```json
+{"type":"event","data":{"type":"SendFile","path":"/tmp/data.bin","size":4096}}
 ```
 
 **Errors:**
@@ -710,14 +713,14 @@ swarm> ls bob:D:/projects
 swarm> cp bob D:/projects/main.rs D:/backup/main.rs.bak
   [TOOL:copy_file] OK: Copied 4096 bytes
 
-# Swarm file transfer (first-class packets, not tool calls — no FTP needed)
+# Swarm file transfer (first-class packets, raw bytes)
 swarm> send bob ./build.exe D:/deploy/build.exe
   [SWARM] Sending './build.exe' (2600000 bytes) → bob:D:/deploy/build.exe
   [SWARM] Sent 'D:/deploy/build.exe' — 2600000 bytes written
 
 swarm> recv bob D:/projects/notes.md
-  [SWARM] Received 'notes.md' — 1024 bytes (b64: 1368 chars)
-  [SWARM] Decoded and saved as './notes.md' (1024 bytes)
+  [SWARM] Received 'notes.md' — 1024 bytes
+  [SWARM] Saved as './notes.md' (1024 bytes)
 
 swarm> rm bob /tmp/old-log.txt
   [SWARM] Delete '/tmp/old-log.txt': OK
