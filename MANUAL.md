@@ -213,20 +213,39 @@ swarm> ls bob:C:/projects
   f Cargo.toml (512b)
 ```
 
-### Remote Tools
+### Encrypted FTP (File Transfer as Packets)
+
+Dedicated packet types for file operations — faster than tool calls, no overhead.
+
+| Command | Description |
+|---|---|
+| `send <t> <local> <remote>` | Upload a file (max 10MB, base64-encoded) |
+| `recv <t> <remote_path>` | Download a file from a remote agent |
+| `rm <t> <path>` | Delete a file on a remote agent |
+| `mkdir <t> <path>` | Create a directory on a remote agent (recursive) |
+
+**Examples:**
+```
+swarm> send alice ./report.pdf /home/alice/reports/report.pdf
+swarm> recv bob /var/log/app.log
+swarm> rm alice /tmp/junk.txt
+swarm> mkdir bob /home/bob/new-feature
+```
+
+Received files are auto-saved to the current directory (stripped of their remote path).
+
+### Remote Tools (via ToolCall packets)
 
 | Command | Description |
 |---|---|
 | `cp <t> <src> <dst>` | Copy a file on a remote agent |
 | `mv <t> <src> <dst>` | Move/rename a file on a remote agent |
-| `rm <t> <path>` | Delete a file on a remote agent |
-| `mkdir <t> <path>` | Create a directory on a remote agent |
 | `size <t> <path>` | Get file size on a remote agent |
 | `env <t> [name]` | Get env var on a remote agent |
 | `whoami <t>` | Get hostname/username of a remote agent |
 | `sleep <t> <ms>` | Pause a remote agent (max 60s) |
 | `http-get <t> <url>` | HTTP GET from a remote agent |
-| `list-drives <t>` | List drives on a remote agent (tool version) |
+| `list-drives <t>` | List drives on a remote agent |
 | `todos <t> [json]` | Write a TODO.md on a remote agent |
 | `tool <t> <name> [args]` | Invoke any tool by name |
 | `btc <t> <id> [args]` | Binary tool call by byte ID |
@@ -236,8 +255,6 @@ swarm> ls bob:C:/projects
 ```
 swarm> cp alice C:/project/main.rs C:/backup/main.rs.bak
 swarm> mv bob /tmp/draft.md /docs/final.md
-swarm> rm alice /tmp/junk.txt
-swarm> mkdir bob /home/bob/new-feature
 swarm> size alice C:/project/large-file.bin
 swarm> env alice HOME
 swarm> whoami bob
@@ -293,6 +310,8 @@ On connect, the client emits a ready signal:
 {"cmd":"ls","target":"alice","path":"C:/projects"}
 {"cmd":"cp","target":"alice","src":"/tmp/a.txt","dst":"/tmp/b.txt"}
 {"cmd":"mv","target":"bob","src":"/old","dst":"/new"}
+{"cmd":"send","target":"alice","local":"./report.pdf","remote":"/home/alice/report.pdf"}
+{"cmd":"recv","target":"bob","path":"/var/log/app.log"}
 {"cmd":"rm","target":"alice","path":"/tmp/junk.txt"}
 {"cmd":"mkdir","target":"bob","path":"/home/bob/new-dir"}
 {"cmd":"size","target":"alice","path":"/large-file.bin"}
@@ -608,8 +627,9 @@ Use `tools-list` at the interactive prompt to see the full registry, or `{"cmd":
 | Heartbeat | 60-second read timeout |
 | Offline Messages | Queued, delivered on reconnect |
 | Multi-client | Async tasks, one per connection |
+| FTP Max Size | 10 MB per file (base64-encoded) |
 
-### Packet Types (19 total)
+### Packet Types (23 total)
 
 | # | Type | Direction |
 |---|---|---|
@@ -632,6 +652,10 @@ Use `tools-list` at the interactive prompt to see the full registry, or `{"cmd":
 | 17 | `DELETE_CHANNEL` | Client → Server |
 | 18 | `HIDE_CHANNEL` | Client → Server |
 | 19 | `ASSIGN_TASK` | Client → Server |
+| 20 | `SEND_FILE` | Client → Target Agent |
+| 21 | `RECEIVE_FILE` | Client → Target Agent |
+| 22 | `DELETE_FILE` | Client → Target Agent |
+| 23 | `MAKE_DIR` | Client → Target Agent |
 
 ---
 
@@ -676,10 +700,10 @@ swarm> status Working on login timeout
 swarm> done a1b2c3d4-...
 ```
 
-### Example 3: Remote Tool Execution
+### Example 3: Remote Tool Execution + FTP
 
 ```bash
-# Alice runs tools on Bob's machine
+# Alice runs tools and FTP transfers on Bob's machine
 swarm> whoami bob
   [TOOL:whoami] OK: bob@bob-pc (windows)
 
@@ -694,11 +718,20 @@ swarm> ls bob:D:/projects
 swarm> cp bob D:/projects/main.rs D:/backup/main.rs.bak
   [TOOL:copy_file] OK: Copied 4096 bytes
 
-swarm> env bob PATH
-  [TOOL:env_var] OK: C:\Windows\System32;...
+# FTP commands (fast, dedicated packets, not tool calls)
+swarm> send bob ./build.exe D:/deploy/build.exe
+  [FTP] Sending './build.exe' (2600000 bytes) → bob:D:/deploy/build.exe
+  [FTP] Sent 'D:/deploy/build.exe' — 2600000 bytes written
 
-swarm> http-get bob https://api.github.com/repos/ZurkinPor/swarm
-  [TOOL:http_get] OK: HTTP/1.1 200 OK...
+swarm> recv bob D:/projects/notes.md
+  [FTP] Received 'notes.md' — 1024 bytes (b64: 1368 chars)
+  [FTP] Decoded and saved as './notes.md' (1024 bytes)
+
+swarm> rm bob /tmp/old-log.txt
+  [FTP] Delete '/tmp/old-log.txt': OK
+
+swarm> mkdir bob D:/new-project/src
+  [FTP] Mkdir 'D:/new-project/src': OK
 ```
 
 ### Example 4: AI Harness via Pipe Mode

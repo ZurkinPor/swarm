@@ -62,13 +62,26 @@ Clients can run in `--pipe` mode for programmatic control by AI agent harnesses:
 - **Stderr** — Connection logs and errors (keeps stdout pure JSON)
 - **Ready signal** — `{"type":"ready","username":"..."}` sent on connect
 
+### Tool Execution System
+
+Swarm includes a **37-tool registry** covering file operations, shell commands, HTTP, system introspection, and AI orchestration:
+
+| Range | Count | Category |
+|---|---|---|
+| `0x01`–`0x07` | 7 | Core file ops (write, read, run_command, list_dir, create_dir, delete_file, file_exists) |
+| `0x08`–`0x0F` | 8 | Extended (list_drives, http_get, copy_file, move_file, file_size, env_var, sleep, whoami) |
+| `0x80`–`0x93` | 20 | AI assistant (spawn_agents, read_files, str_replace, browser_use, code_reviewer, thinker, glob, etc.) |
+| `0x83` | 1 | write_todos (structured TODO.md generation) |
+
+Tools can be invoked via JSON `TOOL_CALL` packets or compact binary format (magic byte `0x01`). The `run_command` tool enforces a real timeout (polls child process, kills on expiry). The `env_var` tool caps output at 200 entries to prevent explosion.
+
 ### Shared Workspace
 
 Swarm supports two workspace modes:
 
 1. **Git mode (default)** — Each agent has the same GitHub project cloned locally on its own machine. All agents work independently on their local copies, communicating changes and coordinating via the swarm. This is the recommended setup for most development workflows.
 
-2. **Single-host mode (non-Git)** — The project lives as a plain folder on one agent's computer — no Git required. Other agents issue tool calls, file listings, and HTTP requests over TCP against that host agent's machine. Useful for quick collaboration, legacy projects, or any folder-based work where setting up Git isn't desired.
+2. **Single-host mode (non-Git)** — The project lives as a plain folder on one agent's computer — no Git required. Other agents issue tool calls, FTP transfers, file listings, and HTTP requests over TCP against that host agent's machine. Useful for quick collaboration, legacy projects, or any folder-based work where setting up Git isn't desired.
 
 In either mode, agents can also create local files unrelated to the project (notes, documentation, drafts, etc.) and hand them off to other agents as needed.
 
@@ -98,6 +111,50 @@ All communication uses structured packets. Each packet has a **type** field and 
 | 11 | `HTTP_REQUEST` | Client → Target Agent | Ask an agent to perform an HTTP request (GET/POST/PUT/DELETE/OPTIONS/etc.) to a URL, with optional payload and query string. Results are returned to the requester. |
 | 12 | `TOOL_CALL` | Client → Target Agent | Invoke a named tool on the target agent's machine with supplied arguments. Results are returned. |
 | 13 | `TASK_COMPLETE` | Client → Server | Agent notifies the swarm that a task is finished, optionally including results or artifacts. |
+| 19 | `ASSIGN_TASK` | Client → Server | Orchestrator assigns a pending task to a specific agent. Only orchestrators can send this. Non-orchestrator agents cannot `take` tasks when an orchestrator is present. |
+| 20 | `SEND_FILE` | Client → Target Agent | Upload a file to a remote agent (base64-encoded in payload, max 10MB). Encrypted FTP — file content is encrypted along with the packet. |
+| 21 | `RECEIVE_FILE` | Client → Target Agent | Request a file from a remote agent. The target reads the file and returns it base64-encoded in the response. |
+| 22 | `DELETE_FILE` | Client → Target Agent | Delete a file on a remote agent. Dedicated FTP packet (not a tool call) for fast, encrypted file deletion. |
+| 23 | `MAKE_DIR` | Client → Target Agent | Create a directory (recursively) on a remote agent. Dedicated FTP packet for encrypted directory creation. |
+
+### Orchestrator Mode
+
+When `--orchestrator` is set on any agent (server or client), the swarm enters **managed task mode**:
+
+- Non-orchestrator agents **cannot `take` tasks** — they receive an error: *"An orchestrator is present — you cannot take tasks."*
+- The orchestrator can **`assign` tasks** to specific agents via `ASSIGN_TASK` (#19).
+- The orchestrator can still **self-claim** tasks via `take`.
+- When all orchestrators leave, the swarm reverts to free-for-all mode.
+
+When no orchestrator is present, task claiming has a **2-second grace period** after task creation. The `take` command silently skips tasks younger than 2 seconds, ensuring all agents see the `TaskCreated` broadcast before anyone claims the task — preventing accidental double-takes.
+
+### Binary Tool Call Protocol
+
+Tool calls can be sent in a compact binary format instead of JSON for reduced overhead:
+
+```
+Byte 0:    0x01      (magic byte — marks this as binary, not JSON)
+Byte 1:    tool_id   (u8 — 0x01–0x93, see tool registry)
+Bytes 2-3: target_len (u16, big-endian)
+Bytes 4..:  target    (UTF-8)
+Next 2:    requester_len (u16, big-endian)
+Next ..:   requester   (UTF-8)
+Next 4:    args_len    (u32, big-endian)
+Next ..:   args_json   (UTF-8 JSON)
+```
+
+Total overhead: **12 bytes + target + requester** — substantially smaller than JSON for large tool calls. 37 tools are registered with IDs from `0x01` to `0x93`. Server detects the `0x01` magic byte after decryption and forwards to the target agent. The target executes the tool and returns a JSON response as usual.
+
+### Encrypted FTP
+
+File transfer is done via dedicated packet types (#20–#23), not tool calls:
+
+- **SEND_FILE** — Upload a file to a remote agent. Content is base64-encoded. Max 10MB per transfer. Server forwards to target; target writes the file and returns bytes written.
+- **RECEIVE_FILE** — Request a file from a remote agent. Server forwards to target; target reads and base64-encodes, returns content.
+- **DELETE_FILE** — Delete a file on a remote agent. Fast, no tool overhead.
+- **MAKE_DIR** — Create a directory (recursively) on a remote agent.
+
+Unlike tool calls, these are first-class packets that the server routes directly with minimal overhead. All transfers are AES-256-GCM encrypted along with the outer frame.
 
 ### Packet Lifecycle Example
 
@@ -115,6 +172,13 @@ All communication uses structured packets. Each packet has a **type** field and 
 4. **Agent B** sends `MESSAGE` to the channel → **Server** routes to all channel members except sender.
 5. **Agent B** sends `HIDE_CHANNEL` → **Server** hides the channel from Agent B's list. Agent B is still a member.
 6. **Agent A** sends `DELETE_CHANNEL` → **Server** removes the channel entirely. Broadcasts `ChannelDeleted`.
+
+### FTP Lifecycle Example
+
+1. **Agent A** sends `SEND_FILE` → **Server** forwards to **Agent B**. Agent B writes the file to disk and responds with bytes written.
+2. **Agent A** sends `RECEIVE_FILE` → **Server** forwards to **Agent B**. Agent B reads the file, base64-encodes it, and returns the content.
+3. **Agent A** sends `DELETE_FILE` → **Server** forwards to **Agent B**. Agent B deletes the file and responds with success/failure.
+4. **Agent A** sends `MAKE_DIR` → **Server** forwards to **Agent B**. Agent B creates the directory recursively and responds.
 
 ---
 
@@ -172,8 +236,9 @@ All communication uses structured packets. Each packet has a **type** field and 
 
 ## Future Considerations
 
-- **File transfer** (`SEND_FILE`, `RECEIVE_FILE` packets) for explicit file sharing between agents.
 - **Streaming** — Persistent TCP stream for real-time log tailing or long-running command output.
 - **Agent discovery** — UDP broadcast or mDNS for LAN-based auto-discovery.
 - **Key rotation** — In-band key rotation protocol for long-running swarms.
 - **Compression** — Optional gzip/zstd compression for large payloads.
+- **Chunked file transfer** — Split large files into multiple frames for transfers exceeding the 10MB limit.
+- **Directory transfer** — Recursive send/recv for entire directory trees as a single operation.
