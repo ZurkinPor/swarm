@@ -16,12 +16,16 @@ The Swarm wire format is a purpose-built binary protocol. Packet types are ident
 | **Topology** | Hub-and-spoke (one node acts as routing server, others connect as clients) |
 | **Encryption** | AES-256-GCM, 64-character hex key |
 | **Identity** | Username-based agents with optional roles |
-| **Wire Format** | Binary: `[type: u8][payload_len: u32 BE][payload]` |
+| **Wire Format** | Binary: `[type: u8][compression: u8][uncompressed_len: u32 BE][payload]` |
 | **Max Frame** | 16 MiB |
 
 ## Encryption
 
 All traffic is encrypted with AES-256-GCM. A 64-character hexadecimal key is read from `swarm.key` at startup. Every node must share the same key. There is no plaintext on the wire — even the first byte of every frame is encrypted.
+
+**Processing order (send):** Payload → zstd:11 compress (if >256B and compressible) → binary encode → AES-256-GCM encrypt → length-prefixed frame → TCP
+
+**Processing order (receive):** TCP → length-prefixed frame → AES-256-GCM decrypt → binary decode → zstd decompress → payload
 
 ## Architecture
 
@@ -64,9 +68,19 @@ Every packet (after AES-256-GCM decryption):
 
 ```
 Byte 0:       packet_type (u8)
-Bytes 1-4:    payload_length (u32, big-endian)
-Bytes 5..:    payload (type-specific binary fields)
+Byte 1:       compression (u8) — 0x00 = none, 0x1B = zstd:11
+              Encoded as (algorithm << 4) | level: 0=none, 1=zstd
+Bytes 2-5:    uncompressed_payload_length (u32, big-endian)
+Bytes 6..:    payload (possibly zstd-compressed; type-specific binary fields)
 ```
+
+### Compression
+
+Payloads larger than 256 bytes are automatically compressed with zstd level 11 before encryption. The compression byte `0x1B` means "zstd algorithm, level 11" — `(1 << 4) | 11`.
+
+- **Threshold**: 256 bytes — smaller payloads are sent uncompressed (overhead not worth it)
+- **Fallback**: If zstd cannot shrink the data (already compressed payload), it falls back to uncompressed
+- **File transfer**: SendFile skips wire compression for video, audio, image, and archive formats that are already compressed
 
 ### Payload primitives
 
@@ -95,7 +109,7 @@ Bytes 5..:    payload (type-specific binary fields)
 
 ## Packet Types
 
-23 packet types, each identified by a u8 type ID on the wire.
+24 packet types, each identified by a u8 type ID on the wire.
 
 ### Connection (1–3)
 
@@ -166,6 +180,12 @@ Notification events (type 3):
 | 11 | `HTTP_REQUEST` | Client → Target | `str8(req) str8(target) u8(method: 0–6) str16(url) u8(n_headers) [(str16,str16)...] opt_str16(body) u8(n_params) [(str16,str16)...]` |
 | 12 | `TOOL_CALL` | Client → Target | `str8(req) str8(target) str8(tool_name) json(arguments)` |
 
+### Agent listing (24)
+
+| # | Type | Direction | Binary payload |
+|---|---|---|---|
+| 24 | `LIST_USERS` | Client → Server | `str8(requester)` |
+
 ### Enums
 
 | Enum | Values (wire: Rust) |
@@ -198,6 +218,21 @@ File operations use dedicated packet types (#20–#23) for minimal overhead:
 - **RECEIVE_FILE** (#21) — Requests a file from a target. The target reads the file and returns raw bytes.
 - **DELETE_FILE** (#22) — Deletes a file on a target.
 - **MAKE_DIR** (#23) — Creates a directory recursively on a target.
+
+Wire compression is intelligently skipped for incompressible file types. The `is_compressible_file()` function checks the file extension:
+
+| Category | Compressed? | Examples |
+|---|---|---|
+| Code | ✅ zstd:11 | `.rs`, `.py`, `.js`, `.ts`, `.go`, `.cpp`, `.java`, `.c`, `.rb`, `.php`, `.swift`, `.kt`, `.cs`, `.sh`, `.bat` |
+| Documents / Markup | ✅ zstd:11 | `.md`, `.txt`, `.json`, `.yaml`, `.toml`, `.xml`, `.html`, `.css`, `.csv`, `.log`, `.cfg`, `.sql` |
+| Executables / Libraries | ✅ zstd:11 | `.exe`, `.dll`, `.so`, `.dylib`, `.wasm`, `.obj`, `.o`, `.lib`, `.a`, `.sys` |
+| Document formats | ✅ zstd:11 | `.docx`, `.xlsx`, `.pptx`, `.odt`, `.svg`, `.rtf` |
+| Fonts | ✅ zstd:11 | `.ttf`, `.otf`, `.woff`, `.woff2` |
+| Extensionless / Dotfiles | ✅ zstd:11 | `Dockerfile`, `Makefile`, `LICENSE`, `.gitignore`, `.env` |
+| Video | ❌ skip | `.mp4`, `.avi`, `.mkv`, `.mov`, `.webm`, `.flv` |
+| Audio | ❌ skip | `.mp3`, `.wav`, `.flac`, `.ogg`, `.aac`, `.opus` |
+| Images | ❌ skip | `.jpg`, `.png`, `.gif`, `.webp`, `.bmp`, `.svgz`, `.ico` |
+| Archives | ❌ skip | `.zip`, `.gz`, `.xz`, `.7z`, `.rar`, `.tar`, `.bz2`, `.zst` |
 
 Files are encrypted with AES-256-GCM along with the outer frame. There is no separate encryption negotiation or key exchange — the same 64-char hex key protects all traffic.
 
@@ -254,6 +289,5 @@ The `run_command` tool enforces a real timeout (polls child process, kills on ex
 - Streaming — persistent stream for real-time log tailing or long-running command output
 - Agent discovery — UDP broadcast for LAN-based auto-discovery
 - Key rotation — in-band key rotation protocol
-- Compression — optional zstd compression for large payloads
 - Chunked transfer — split files exceeding 10 MB across multiple frames
 - Directory transfer — recursive send/recv for entire trees

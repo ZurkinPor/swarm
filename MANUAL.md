@@ -234,7 +234,7 @@ swarm> rm alice /tmp/junk.txt
 swarm> mkdir bob /home/bob/new-feature
 ```
 
-Received files are auto-saved to the current directory (stripped of their remote path).
+Received files are auto-saved to the current directory (stripped of their remote path). Wire compression is applied automatically — code and text files get zstd:11 compressed; video, audio, and image files are sent as-is.
 
 ### Remote Tools
 
@@ -377,11 +377,23 @@ All Swarm packets use a unified binary format on the wire:
 
 ```
 Byte 0:       packet_type (u8 — see packet type table)
-Bytes 1-4:    payload_len (u32, big-endian)
-Bytes 5..:    payload (type-specific binary fields)
+Byte 1:       compression (u8) — 0x00 = none, 0x1B = zstd:11
+Bytes 2-5:    uncompressed_payload_len (u32, big-endian)
+Bytes 6..:    payload (possibly zstd-compressed)
 ```
 
 Payload fields use length-prefixed encoding: `str8` (u8 + UTF-8), `str16` (u16 + UTF-8), `bytes` (u32 + raw bytes for file content), `json` (u32 + UTF-8 JSON for complex structures like tool arguments).
+
+### Compression (zstd:11)
+
+Payloads larger than 256 bytes are automatically compressed. SendFile skips compression for incompressible file types:
+
+| Compressed | Skipped |
+|---|---|
+| `.rs .py .js .go .cpp .c .java` | `.mp4 .avi .mkv .mov` |
+| `.md .txt .json .csv .xml .sql` | `.mp3 .wav .flac .ogg` |
+| `.exe .dll .so .wasm .obj` | `.jpg .png .gif .webp` |
+| `Dockerfile Makefile .gitignore` | `.zip .gz .7z .rar` |
 
 ### Tool call by ID
 
@@ -626,12 +638,13 @@ Use `tools-list` at the interactive prompt to see the full registry, or `{"cmd":
 | Encryption | AES-256-GCM on every frame |
 | Default Port | 6996 |
 | Max Frame | 16 MiB |
+| Compression | zstd:11 on payloads > 256 bytes; skipped for video/audio/image/archive |
 | Heartbeat | 60-second read timeout |
 | Offline Messages | Queued, delivered on reconnect |
 | Multi-client | Async tasks, one per connection |
 | File Transfer Max | 10 MB per file (raw bytes) |
 
-### Packet Types (23 total)
+### Packet Types (24 total)
 
 | # | Type | Direction |
 |---|---|---|
