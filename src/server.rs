@@ -247,6 +247,7 @@ async fn process_packet(
                 payload.capabilities.clone(),
                 payload.workspace_mode.clone(),
                 payload.project_root.clone(),
+                payload.is_orchestrator,
             );
             *username = Some(payload.username.clone());
             let conn = ConnectionHandle { tx: tx.clone() };
@@ -278,6 +279,26 @@ async fn process_packet(
 
         Packet::TakeTask(payload) => {
             let mut state = state.lock().await;
+            // If an orchestrator is present, agents cannot take tasks — they must be assigned
+            if state.has_orchestrator() {
+                // Check if this agent is the orchestrator (orchestrator can still self-assign)
+                let is_orch = state
+                    .agents
+                    .get(&payload.username)
+                    .map(|a| a.is_orchestrator)
+                    .unwrap_or(false);
+                if !is_orch {
+                    send_response_to(
+                        crypto,
+                        tx,
+                        &ResponsePacket::Error {
+                            requester: payload.username.clone(),
+                            message: "An orchestrator is present — you cannot take tasks. Wait for the orchestrator to assign tasks to you.".into(),
+                        },
+                    );
+                    return;
+                }
+            }
             let (taken, not_found) = state.take_task(&payload.username, &payload.task_ids);
             println!(
                 "[SERVER] Agent '{}' took {} tasks",
@@ -293,6 +314,29 @@ async fn process_packet(
                         message: format!("Tasks not found: {:?}", not_found),
                     },
                 );
+            }
+        }
+
+        Packet::AssignTask(payload) => {
+            let mut state = state.lock().await;
+            match state.assign_task(&payload.assigned_by, payload.task_id, &payload.assign_to)
+            {
+                Ok(title) => {
+                    println!(
+                        "[SERVER] Orchestrator '{}' assigned task '{}' to '{}'",
+                        payload.assigned_by, title, payload.assign_to
+                    );
+                }
+                Err(e) => {
+                    send_response_to(
+                        crypto,
+                        tx,
+                        &ResponsePacket::Error {
+                            requester: payload.assigned_by.clone(),
+                            message: e,
+                        },
+                    );
+                }
             }
         }
 

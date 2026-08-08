@@ -52,6 +52,10 @@ pub enum Packet {
     HttpRequest(HttpRequestPayload),
     /// Invoke a named tool on the target agent's machine.
     ToolCall(ToolCallPayload),
+
+    // --- Task assignment ---
+    /// Orchestrator assigns a task directly to an agent.
+    AssignTask(AssignTaskPayload),
 }
 
 // ── Payloads ────────────────────────────────────────────────
@@ -65,6 +69,9 @@ pub struct JoinPayload {
     pub workspace_mode: Option<String>,
     /// Root directory of the project (meaningful in single-host mode).
     pub project_root: Option<String>,
+    /// Whether this agent is an orchestrator
+    #[serde(default)]
+    pub is_orchestrator: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -81,6 +88,8 @@ pub enum NotifyPayload {
         role: Option<String>,
         workspace_mode: Option<String>,
         project_root: Option<String>,
+        #[serde(default)]
+        is_orchestrator: bool,
     },
     AgentLeft {
         username: String,
@@ -282,6 +291,18 @@ pub struct ToolCallPayload {
     pub arguments: serde_json::Value,
 }
 
+// ── Task assignment ──
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AssignTaskPayload {
+    /// Who is doing the assigning (must be orchestrator).
+    pub assigned_by: String,
+    /// Which task to assign.
+    pub task_id: Uuid,
+    /// Who gets the task.
+    pub assign_to: String,
+}
+
 // ── Response packets ──
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -356,6 +377,7 @@ impl Packet {
             Packet::HttpRequest(_) => "HTTP_REQUEST",
             Packet::ToolCall(_) => "TOOL_CALL",
             Packet::TaskComplete(_) => "TASK_COMPLETE",
+            Packet::AssignTask(_) => "ASSIGN_TASK",
         }
     }
 }

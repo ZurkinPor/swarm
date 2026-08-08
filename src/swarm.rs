@@ -62,6 +62,7 @@ impl SwarmState {
                 role: agent.role.clone(),
                 workspace_mode: agent.workspace_mode.clone(),
                 project_root: agent.project_root.clone(),
+                is_orchestrator: agent.is_orchestrator,
             })
             .ok();
         self.statuses.insert(
@@ -142,6 +143,61 @@ impl SwarmState {
             .ok();
         self.tasks.insert(task.id, task.clone());
         task
+    }
+
+    /// Check whether any connected agent is an orchestrator.
+    pub fn has_orchestrator(&self) -> bool {
+        self.agents.values().any(|a| a.is_orchestrator)
+    }
+
+    /// Assign a task to a specific agent. Only orchestrators can call this.
+    /// Returns Ok(task_title) on success, Err(message) on failure.
+    pub fn assign_task(
+        &mut self,
+        assigned_by: &str,
+        task_id: Uuid,
+        assign_to: &str,
+    ) -> Result<String, String> {
+        // Verify assigner is an orchestrator
+        let assigner = self
+            .agents
+            .get(assigned_by)
+            .ok_or_else(|| format!("Assigner '{}' not found", assigned_by))?;
+        if !assigner.is_orchestrator {
+            return Err(format!(
+                "'{}' is not an orchestrator — only orchestrators can assign tasks",
+                assigned_by
+            ));
+        }
+
+        // Verify target agent exists
+        if !self.agents.contains_key(assign_to) {
+            return Err(format!("Target agent '{}' not found", assign_to));
+        }
+
+        // Find and assign the task
+        let task = self
+            .tasks
+            .get_mut(&task_id)
+            .ok_or_else(|| format!("Task {} not found", task_id))?;
+
+        if task.status != TaskStatus::Pending {
+            return Err(format!(
+                "Task {} is not pending (current status: {:?})",
+                task_id, task.status
+            ));
+        }
+
+        let title = task.title.clone();
+        task.status = TaskStatus::InProgress;
+        task.assignees.push(assign_to.to_string());
+        self.broadcast_tx
+            .send(NotifyPayload::TaskAssigned {
+                task_id,
+                username: assign_to.to_string(),
+            })
+            .ok();
+        Ok(title)
     }
 
     pub fn take_task(&mut self, username: &str, task_ids: &[Uuid]) -> (Vec<Uuid>, Vec<Uuid>) {

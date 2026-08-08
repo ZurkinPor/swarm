@@ -55,6 +55,10 @@ enum Commands {
         /// Workspace mode: "git" (default) or "single-host"
         #[arg(long, default_value = "git", value_parser = ["git", "single-host"])]
         workspace_mode: String,
+
+        /// Run as orchestrator — can assign tasks to other agents
+        #[arg(long)]
+        orchestrator: bool,
     },
     /// Connect to a swarm server as a client agent
     Connect {
@@ -89,6 +93,10 @@ enum Commands {
         /// Pipe mode: JSON commands on stdin, JSON events on stdout (for AI harnesses)
         #[arg(long)]
         pipe: bool,
+
+        /// Run as orchestrator — can assign tasks to other agents
+        #[arg(long)]
+        orchestrator: bool,
     },
     /// Generate a new random key file
     GenKey {
@@ -116,7 +124,7 @@ async fn main() -> anyhow::Result<()> {
             println!("Key written to {}", output.display());
             println!("Share this key with all swarm members.");
         }
-        Commands::Serve { username, role, workspace_mode } => {
+        Commands::Serve { username, role, workspace_mode, orchestrator } => {
             let crypto = load_key(&cli.key, &cli.key_file)?;
             let crypto = Arc::new(crypto);
 
@@ -134,16 +142,18 @@ async fn main() -> anyhow::Result<()> {
                         vec!["server".into(), "orchestrator".into()],
                         Some(workspace_mode.clone()),
                         None,
+                        orchestrator,
                     ),
                     crate::swarm::ConnectionHandle { tx },
                 );
             }
 
             println!("=== Swarm Server ===");
-            println!("Key file: {}", cli.key_file.display());
-            println!("Port:     {}", cli.port);
-            println!("Username: {}", username);
-            println!("Role:     {:?}", role);
+            println!("Key file:     {}", cli.key_file.display());
+            println!("Port:         {}", cli.port);
+            println!("Username:     {}", username);
+            println!("Role:         {:?}", role);
+            println!("Orchestrator: {}", if orchestrator { "YES" } else { "no" });
 
             let server = server::Server::new(state, crypto, bind_addr);
             server.run().await?;
@@ -157,6 +167,7 @@ async fn main() -> anyhow::Result<()> {
             workspace_mode,
             project_root,
             pipe,
+            orchestrator,
         } => {
             let crypto = load_key(&cli.key, &cli.key_file)?;
             let crypto = Arc::new(crypto);
@@ -169,9 +180,10 @@ async fn main() -> anyhow::Result<()> {
                 capabilities.split(',').map(|s| s.trim().to_string()).collect();
 
             println!("=== Swarm Client ===");
-            println!("Server: {}", server_addr);
-            println!("Key:    {}", cli.key_file.display());
-            println!("Agent:  {} (role: {:?})", username, role);
+            println!("Server:       {}", server_addr);
+            println!("Key:          {}", cli.key_file.display());
+            println!("Agent:        {} (role: {:?})", username, role);
+            println!("Orchestrator: {}", if orchestrator { "YES" } else { "no" });
 
             client::run_client(
                 server_addr,
@@ -182,6 +194,7 @@ async fn main() -> anyhow::Result<()> {
                 workspace_mode,
                 project_root,
                 pipe,
+                orchestrator,
             )
             .await?;
         }
