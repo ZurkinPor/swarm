@@ -283,7 +283,7 @@ fn json_command_to_packet(cmd: &Value, username: &str) -> Result<Option<Packet>,
             let target = cmd["target"].as_str().ok_or("'target' required")?;
             let body = cmd["body"].as_str().unwrap_or("");
             let to = if let Some(channel) = target.strip_prefix('#') { packet::MessageTarget::Channel { channel: channel.to_string() } } else { packet::MessageTarget::Direct { username: target.to_string() } };
-            Ok(Some(Packet::Message(packet::MessagePayload { from: username.to_string(), to, body: body.to_string() })))
+            Ok(Some(Packet::Message(packet::MessagePayload { from: username.to_string(), to, body: body.to_string(), timestamp: now_secs() })))
         }
         "task" => {
             let title = cmd["title"].as_str().ok_or("'title' required")?;
@@ -495,9 +495,9 @@ fn handle_incoming_packet(packet: &Packet, our_username: &str) {
                 let extra = if let (Some(tid), Some(pct)) = (task_id, progress_pct) { format!(" on task {} ({}%)", tid, pct) } else { String::new() };
                 println!("[SWARM] Agent '{}' is {}{}", username, status, extra);
             }
-            packet::NotifyPayload::MessageReceived { from, to, body } => if to == our_username { println!("[MSG from {}] {}", from, body); }
+            packet::NotifyPayload::MessageReceived { from, to, body, timestamp } => if to == our_username { let ts = format_time(*timestamp); println!("[MSG from {}] [{}] {}", from, ts, body); }
         },
-        Packet::Message(msg) => println!("[MSG] {}: {}", msg.from, msg.body),
+        Packet::Message(msg) => { let ts = format_time(msg.timestamp); println!("[MSG] {} [{}]: {}", msg.from, ts, msg.body); }
         _ => {}
     }
 }
@@ -513,7 +513,7 @@ fn parse_command(line: &str, username: &str) -> Option<Packet> {
             let target = sub.next()?;
             let body = sub.next().unwrap_or("");
             let to = if let Some(channel) = target.strip_prefix('#') { packet::MessageTarget::Channel { channel: channel.to_string() } } else { packet::MessageTarget::Direct { username: target.to_string() } };
-            Some(Packet::Message(packet::MessagePayload { from: username.to_string(), to, body: body.to_string() }))
+            Some(Packet::Message(packet::MessagePayload { from: username.to_string(), to, body: body.to_string(), timestamp: now_secs() }))
         }
         "task" => {
             let mut role = None; let mut title = rest.to_string();
@@ -652,6 +652,15 @@ fn list_local_dir(path: &str, recursive: bool) -> anyhow::Result<Vec<packet::Dir
         }
     }
     Ok(result)
+}
+
+fn now_secs() -> u64 { std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs() }
+
+fn format_time(ts: u64) -> String {
+    let secs = ts % 60;
+    let mins = (ts / 60) % 60;
+    let hours = (ts / 3600) % 24;
+    format!("{:02}:{:02}:{:02}", hours, mins, secs)
 }
 
 fn print_help() {

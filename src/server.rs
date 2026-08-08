@@ -305,7 +305,7 @@ async fn process_packet(
 
         Packet::Message(payload) => {
             let mut state = state.lock().await;
-            state.route_message(&payload.from, &payload.to, &payload.body);
+            state.route_message(&payload.from, &payload.to, &payload.body, payload.timestamp);
         }
 
         Packet::CreateChannel(payload) => {
