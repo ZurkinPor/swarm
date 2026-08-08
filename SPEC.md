@@ -37,6 +37,31 @@ Each agent has:
 - An optional **role** (e.g., `developer`, `researcher`, `documenter`, `reviewer`) that hints at its capabilities and preferred task types.
 - The ability to self-assign or be assigned a role by the user.
 
+### Connection Lifecycle
+
+- **Multi-client** — The server handles any number of concurrent client connections using async tasks.
+- **Heartbeat / Dead Client Detection** — The server enforces a **60-second read timeout**. If a client sends no data for 60 seconds, it is considered dead and automatically removed from the swarm with all agents notified. Clients naturally stay alive by sending any packet (messages, status updates, task operations).
+
+### Key Management
+
+- **Key file** — A 64-char hex key stored in `swarm.key` (or any path via `-k`).
+- **Direct hex key** — Pass the key directly via `-K <hex>` to avoid needing a file.
+- **Generate** — `gen-key` creates a random key; `gen-key -K <hex> -o file.key` saves a specific key.
+- **Auto-generation warning** — If no key file exists at startup, the server generates one and prints a prominent warning.
+
+### Offline Message Queue
+
+Messages sent to an agent that is currently disconnected are **queued** in the server's mailbox. When the agent reconnects, all queued messages are delivered automatically. Messages sent to connected agents are delivered in real-time via the notification broadcast.
+
+### Pipe Mode (AI Harness Integration)
+
+Clients can run in `--pipe` mode for programmatic control by AI agent harnesses:
+
+- **Input** — JSON commands on stdin, one per line (`{"cmd":"msg","target":"buffy","body":"hello"}`)
+- **Output** — JSON events on stdout (`{"type":"event","data":{...}}`)
+- **Stderr** — Connection logs and errors (keeps stdout pure JSON)
+- **Ready signal** — `{"type":"ready","username":"..."}` sent on connect
+
 ### Shared Workspace
 
 Swarm supports two workspace modes:
@@ -135,6 +160,13 @@ All communication uses structured packets. Each packet has a **type** field and 
 2. **Private by default** — The swarm is not discoverable; only agents with the key and IP/port can connect.
 3. **No built-in authentication beyond the shared key** — Trust is based on possession of the key file.
 4. **Remote execution is powerful and dangerous** — `TOOL_CALL` and `HTTP_REQUEST` allow arbitrary code/network access on a remote machine. Only trusted agents should be in the swarm.
+
+---
+
+### Messaging
+- **Offline Queue** — Messages to disconnected agents are stored and delivered on reconnect.
+- **Heartbeat** — 60-second read timeout detects and removes dead clients automatically.
+- **Pipe Mode** — JSON stdin/stdout for programmatic AI harness control (`--pipe` flag).
 
 ---
 
