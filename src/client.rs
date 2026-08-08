@@ -70,6 +70,26 @@ async fn run_interactive(
     let username_clone = username.clone();
     let username_read = username.clone();
 
+    // Heartbeat task: send STATUS every 30s to keep connection alive
+    let heartbeat_writer = writer.clone();
+    let heartbeat_crypto = crypto.clone();
+    let heartbeat_username = username.clone();
+    let heartbeat_handle = tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+            let ping = Packet::Status(packet::StatusPayload {
+                username: heartbeat_username.clone(),
+                status: packet::AgentStatus::Idle,
+                task_id: None,
+                progress_pct: None,
+                message: Some("heartbeat".into()),
+            });
+            if send_packet(&heartbeat_writer, &heartbeat_crypto, &ping).await.is_err() {
+                break;
+            }
+        }
+    });
+
     let read_handle = tokio::spawn(async move {
         while let Some(frame_result) = framed.next().await {
             let encrypted = match frame_result {
@@ -153,6 +173,7 @@ async fn run_interactive(
     });
     send_packet(&writer, &crypto, &leave_packet).await?;
 
+    heartbeat_handle.abort();
     read_handle.abort();
     println!("[CLIENT] Disconnected from swarm.");
     Ok(())
@@ -194,6 +215,26 @@ async fn run_pipe_mode(
     let writer_p2p = writer.clone();
     let crypto_read = crypto.clone();
     let username_read = username.clone();
+
+    // Heartbeat task for pipe mode
+    let heartbeat_writer = writer.clone();
+    let heartbeat_crypto = crypto.clone();
+    let heartbeat_username = username.clone();
+    let _heartbeat_handle = tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+            let ping = Packet::Status(packet::StatusPayload {
+                username: heartbeat_username.clone(),
+                status: packet::AgentStatus::Idle,
+                task_id: None,
+                progress_pct: None,
+                message: Some("heartbeat".into()),
+            });
+            if send_packet(&heartbeat_writer, &heartbeat_crypto, &ping).await.is_err() {
+                break;
+            }
+        }
+    });
 
     // Spawn read task — forwards incoming packets as JSON events
     let _read_handle = tokio::spawn(async move {
