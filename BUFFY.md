@@ -135,7 +135,9 @@ swarm> send alice ./report.pdf /home/alice/report.pdf
 swarm> recv buffy-beast /var/log/build.log
 ```
 
-Files are transmitted as raw bytes (no encoding overhead). Max 10 MB per transfer.
+Files are transmitted as raw bytes (no encoding overhead). Max 10 MB per transfer. The wire layer automatically compresses all file transfers with **zstd:11** — except for video, audio, image, and archive formats which are sent as-is (they're already compressed).
+
+Code files (`.rs`, `.py`, `.js`, `.go`, etc.), documents (`.md`, `.txt`, `.json`), executables (`.exe`, `.dll`), and extensionless files (Dockerfile, Makefile, .gitignore) all get zstd:11 compression automatically. You don't need to do anything — it's transparent.
 
 ---
 
@@ -194,14 +196,22 @@ swarm> env buffy-beast HOME
 | `status <msg>` | Update your status |
 | `drives <target>` | List target's drives |
 | `ls <target>:<path>` | List target's directory |
-| `send <t> <local> <remote>` | Upload a file |
+| `send <t> <local> <remote>` | Upload a file (zstd:11 compressed) |
 | `recv <t> <path>` | Download a file |
-| `rm <t> <path>` | Delete a file |
-| `mkdir <t> <path>` | Create directory |
-| `tool <t> <name> [args]` | Run a tool on target |
-| `btc <t> <id> [args]` | Run tool by ID |
+| `rm <t> <path>` | Delete a file on target |
+| `mkdir <t> <path>` | Create directory on target |
+| `cp <t> <src> <dst>` | Copy a file on target |
+| `mv <t> <src> <dst>` | Move/rename a file on target |
+| `size <t> <path>` | Get file size on target |
+| `env <t> [name]` | Get env var on target |
+| `sleep <t> <ms>` | Pause target for N ms |
 | `whoami <t>` | Get target's hostname/user |
-| `tools-list` | List all tool IDs |
+| `http-get <t> <url>` | HTTP GET from target |
+| `tool <t> <name> [args]` | Run a tool on target |
+| `btc <t> <id> [args]` | Run tool by binary ID |
+| `tools-list` | List all 37 tool IDs |
+| `hide <name>` | Hide a channel |
+| `delete-channel <name>` | Delete a channel |
 | `help` | Show all commands |
 | `quit` | Disconnect |
 
